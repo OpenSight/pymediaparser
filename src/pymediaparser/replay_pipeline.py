@@ -296,7 +296,7 @@ class ReplayPipeline:
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': 'traditional',
+                        'source': ['traditional'],  # 传统固定间隔采样
                     }
 
                 # 阻塞入队（短超时 + 循环检查 stop_event）
@@ -526,7 +526,7 @@ class ReplayPipeline:
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': 'processor',
+                        'source': ['processor'],  # 处理器模式
                     }
                     self._enqueue_frame(frame_data)
 

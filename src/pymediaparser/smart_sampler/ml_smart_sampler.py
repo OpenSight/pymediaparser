@@ -110,7 +110,7 @@ class MLSmartSampler(SmartSampler):
             self._input_frame_count += 1
 
             if not self.enable_smart:
-                # 降级为纯时间采样
+                # 降级为纯时间采样（传统固定间隔采样）
                 if self._should_emit_by_time(ts):
                     pil_image = self._numpy_to_pil(frame_np)
                     yield {
@@ -118,16 +118,18 @@ class MLSmartSampler(SmartSampler):
                         'timestamp': ts,
                         'frame_index': current_frame_idx,
                         'significant': False,
-                        'source': 'time',
+                        'source': ['traditional'],  # 传统固定间隔采样
                         'original_frame': frame_np,
                     }
                     self._last_emit_ts = ts
                 continue
 
             # ── 首帧初始化 ──
-            # 首帧仅用于初始化 L0/L1/L2 参考帧，不输出到 VLM
+            # 首帧初始化 L0/L1/L2 参考帧，并以周期触发模式输出
             if not self._is_initialized:
-                self._initialize_with_first_frame(frame_np, ts, current_frame_idx)
+                result = self._initialize_with_first_frame(frame_np, ts, current_frame_idx)
+                self._yield_count += 1
+                yield result
                 continue
 
             # ── Layer 0: 硬过滤 ──
@@ -202,13 +204,14 @@ class MLSmartSampler(SmartSampler):
         frame_np: np.ndarray,
         ts: float,
         frame_idx: int,
-    ) -> None:
-        """用首帧初始化 L0、L1、L2 层的参考帧。
+    ) -> Dict[str, Any]:
+        """用首帧初始化 L0、L1、L2 层的参考帧，并以周期触发模式输出。
 
-        首帧作为参考帧，不进行过滤判断，仅初始化各层状态。
+        首帧作为参考帧初始化各层状态，同时作为第一个周期触发帧输出到 VLM。
+        适用于实时流和回放场景，保证语义一致性。
         """
         logger.info(
-            "[首帧初始化] 帧#%d | ts=%.3fs | 作为参考帧初始化L0/L1/L2",
+            "[首帧初始化] 帧#%d | ts=%.3fs | 作为参考帧初始化L0/L1/L2，以周期触发模式输出",
             frame_idx, ts,
         )
 
@@ -216,12 +219,35 @@ class MLSmartSampler(SmartSampler):
         self.hard_filter.check(frame_np, ts)  # 首帧直接通过，保存为参考
 
         # 初始化 L1: FastTriggers 需要前一帧用于差异检测
+        # 注意：detect() 会设置 _last_periodic_ts = ts，确保后续周期触发正确计时
         self.fast_triggers.detect(frame_np, ts)  # 建立 phash、直方图等参考
 
         # 初始化 L2: FrameValidator 需要参考帧用于 SSIM、光流等
         self.frame_validator.update_reference(frame_np)
 
         self._is_initialized = True
+        self._last_emit_ts = ts
+
+        # 构建首帧输出结果（周期触发模式）
+        h, w = frame_np.shape[:2]
+        pil_image = self._numpy_to_pil(frame_np)
+
+        return {
+            'image': pil_image,
+            'timestamp': ts,
+            'frame_index': frame_idx,
+            'significant': False,  # 周期触发非显著帧
+            'source': ['periodic'],  # 首帧为周期触发
+            'original_frame': frame_np,
+            'cropped_frame': frame_np,  # 不裁剪，输出整帧
+            'bbox': (0, 0, w, h),
+            'compression_ratio': 1.0,
+            'change_metrics': {
+                'ssim_score': 1.0,  # 无参考帧，默认完全相似
+                'combined_score': 0.0,  # 无变化
+                'motion_score': 0.0,  # 无运动
+            },
+        }
 
     def _build_result(
         self,
@@ -232,9 +258,6 @@ class MLSmartSampler(SmartSampler):
         validation: Dict[str, Any],
     ) -> Dict[str, Any]:
         """组装与 SmartSampler 完全一致的返回字典，并打印日志。"""
-        # 确定触发源（优先级：运动 > 变化 > 异常 > 时间）
-        source_label, source_field, significant = self._determine_source(triggers)
-
         # 语义区域裁剪
         cropped_frame, bbox, compression_ratio = self._crop_semantic_region(
             frame_np, triggers,
@@ -247,12 +270,15 @@ class MLSmartSampler(SmartSampler):
         ssim_score = validation.get('ssim_score', 1.0)
         combined_score = validation.get('score', 0.0)
 
+        # 判断是否为显著帧：非周期触发即为显著
+        is_significant = 'periodic' not in triggers
+
         result = {
             'image': pil_image,
             'timestamp': ts,
             'frame_index': frame_idx,
-            'significant': significant,
-            'source': source_field,
+            'significant': is_significant,
+            'source': triggers,  # 直接使用触发器列表
             'original_frame': frame_np,
             'cropped_frame': cropped_frame,
             'bbox': bbox,
@@ -277,6 +303,9 @@ class MLSmartSampler(SmartSampler):
             if self.hard_filter.accept_count > 0 else 0.0
         )
 
+        # 生成触发源标签用于日志展示
+        source_label = '、'.join(triggers)
+
         logger.info(
             "[送VLM] 帧#%d | ts=%.3fs | "
             "L2得分=%.3f | 窗口均值=%.3f | 峰值=%s | "
@@ -295,22 +324,6 @@ class MLSmartSampler(SmartSampler):
         )
 
         return result
-
-    def _determine_source(
-        self, triggers: List[str],
-    ) -> tuple[str, str, bool]:
-        """确定触发源（优先级：运动 > 变化 > 异常 > 时间）。
-
-        Returns:
-            (source_label, source_field, significant)
-        """
-        if 'motion' in triggers:
-            return '运动', 'smart', True
-        if 'scene_switch' in triggers:
-            return '变化', 'smart', True
-        if 'anomaly' in triggers:
-            return '异常', 'smart', True
-        return '时间', 'time', False
 
     def _crop_semantic_region(
         self,

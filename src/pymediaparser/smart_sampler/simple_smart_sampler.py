@@ -86,7 +86,7 @@ class SimpleSmartSampler(SmartSampler):
                         'timestamp': ts,
                         'frame_index': current_frame_idx,
                         'significant': False,
-                        'source': 'time',
+                        'source': ['traditional'],  # 传统固定间隔采样
                         'original_frame': frame_np
                     }
                     self._last_emit_ts = ts
@@ -124,12 +124,28 @@ class SimpleSmartSampler(SmartSampler):
             
             pil_image = self._numpy_to_pil(cropped_frame)
             
+            # 收集触发源列表
+            triggers = []
+            if motion_detected:
+                triggers.append('motion')
+            if change_result['significant']:
+                triggers.append('scene_switch')
+            if time_based_emit:
+                triggers.append('periodic')
+            
+            # 如果没有触发源（理论上不应该），默认为 periodic
+            if not triggers:
+                triggers = ['periodic']
+            
+            # 判断是否为显著帧：非周期触发即为显著
+            is_significant = 'periodic' not in triggers or len(triggers) > 1
+            
             result = {
                 'image': pil_image,
                 'timestamp': ts,
                 'frame_index': frame_idx,
-                'significant': change_result['significant'] or motion_detected,
-                'source': 'smart' if not time_based_emit else 'time',
+                'significant': is_significant,
+                'source': triggers,  # 触发源列表
                 'original_frame': frame_np,
                 'cropped_frame': cropped_frame,
                 'bbox': bbox,
@@ -143,16 +159,8 @@ class SimpleSmartSampler(SmartSampler):
             
             self._last_emit_ts = ts
             
-            # 确定真实的触发来源（优先级：运动 > 变化 > 时间）
-            if motion_detected:
-                source = '运动'
-            elif change_result['significant']:
-                source = '变化'
-            else:
-                source = '时间'
-            
-            
             # 打印详细的采样决策信息
+            source_label = '、'.join(triggers)
             logger.info(
                 "[送VLM] 帧#%d | ts=%.3fs | "
                 "相似度=%.3f(阈值<%.2f) | "
@@ -167,7 +175,7 @@ class SimpleSmartSampler(SmartSampler):
                 '是' if motion_detected else '否',
                 motion_score,
                 change_result['combined_score'],
-                source,
+                source_label,
                 compression_ratio * 100
             )
             

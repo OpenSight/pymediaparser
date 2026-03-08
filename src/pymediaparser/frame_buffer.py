@@ -21,11 +21,19 @@ class FrameBuffer:
     触发条件：
     1. 缓冲区满（帧数 >= max_size）
     2. 帧时间戳跨度超限（跨度 >= max_wait_time）
+    3. 周期触发帧到达（is_periodic_boundary=True）时分割批次
     
     时间戳跨度：使用帧自身的相对时间戳计算，适用于实时流和回放场景。
     
+    周期触发帧语义：
+    - 周期触发帧代表 VLM 分析周期的边界
+    - 收到周期触发帧时，先输出当前缓冲区内容，再将该帧作为新批次起点
+    - 确保同一批次内的帧不跨越分析周期
+    
     时序逻辑：
-    - 新帧到达时，先预判入队后的时间跨度
+    - 新帧到达时，先判断是否为周期边界帧
+    - 若为周期边界帧且缓冲区非空，先返回当前批次
+    - 再预判入队后的时间跨度
     - 若跨度超限，先返回当前批次，再将新帧入队
     - 确保同一批次内的帧时间连续，便于大模型理解
     """
@@ -41,13 +49,16 @@ class FrameBuffer:
         """添加帧到缓冲区，返回就绪的批次（如果有）
         
         时序逻辑：
-        1. 预判新帧入队后的时间跨度
-        2. 若跨度超限，先返回当前批次
-        3. 新帧入队
-        4. 检查缓冲区是否满
+        1. 判断是否为周期边界帧（source 包含 'periodic'）
+        2. 若为周期边界帧且缓冲区非空，先返回当前批次
+        3. 预判新帧入队后的时间跨度
+        4. 若跨度超限，先返回当前批次
+        5. 新帧入队
+        6. 检查缓冲区是否满
         
         Args:
             frame_data: 帧数据字典，需包含 'timestamp' 字段
+                       'source' 字段为列表，包含 'periodic' 表示周期边界
             
         Returns:
             就绪的帧批次，或 None（继续等待）
@@ -56,10 +67,21 @@ class FrameBuffer:
             return None
         
         new_timestamp = frame_data.get('timestamp', 0.0)
+        source = frame_data.get('source', [])
+        is_periodic_boundary = 'periodic' in source if isinstance(source, list) else False
         batch_to_return = None
         
-        # 预判：如果新帧入队后时间跨度会超限，先返回当前批次
-        if self.buffer:
+        # 情况1：周期边界帧到达，先清空当前缓冲区
+        # 周期触发帧代表分析周期边界，不应与前一周期帧混在一起
+        if is_periodic_boundary and self.buffer:
+            batch_to_return = self._prepare_batch()
+            logger.info(
+                "[FrameBuffer] 周期边界帧到达，分割批次 - 帧数: %d",
+                len(batch_to_return)
+            )
+        
+        # 情况2：预判新帧入队后时间跨度会超限
+        elif self.buffer:
             first_timestamp = self.buffer[0].timestamp
             predicted_span = new_timestamp - first_timestamp
             
@@ -83,7 +105,7 @@ class FrameBuffer:
         if batch_to_return is not None:
             return batch_to_return
         
-        # 检查缓冲区是否满
+        # 情况3：检查缓冲区是否满
         if len(self.buffer) >= self.max_size:
             batch = self._prepare_batch()
             logger.info("[FrameBuffer] 缓冲区满，输出批次 - 帧数: %d", len(batch))

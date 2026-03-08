@@ -336,7 +336,7 @@ class TestMLSmartSampler:
                 assert 'motion_score' in metrics
 
     def test_source_field_values(self):
-        """source 字段只应为 'smart' 或 'time'。"""
+        """source 字段应为列表格式。"""
         sampler = MLSmartSampler(
             min_frame_interval=0.0,
             backup_interval=2.0,
@@ -345,8 +345,8 @@ class TestMLSmartSampler:
         results = list(sampler.sample(iter(frames)))
 
         for result in results:
-            assert result['source'] in ('smart', 'time'), \
-                f"source 应为 'smart' 或 'time'，实际: {result['source']}"
+            assert isinstance(result['source'], list), \
+                f"source 应为列表，实际: {type(result['source'])}"
 
     def test_disable_smart_sampling(self):
         """禁用智能采样时应退化为时间采样。"""
@@ -360,7 +360,7 @@ class TestMLSmartSampler:
         # 应有输出（基于时间间隔）
         assert len(results) > 0
         for result in results:
-            assert result['source'] == 'time'
+            assert result['source'] == ['traditional']
             assert result['significant'] is False
 
     def test_reset_clears_state(self):
@@ -417,7 +417,8 @@ class TestMLSmartSampler:
         results = list(sampler.sample(iter(frames)))
 
         for result in results:
-            if result['source'] == 'smart':
+            # 非周期触发帧应有裁剪信息
+            if 'periodic' not in result['source']:
                 assert 'cropped_frame' in result
                 assert 'bbox' in result
                 assert 'compression_ratio' in result
@@ -431,3 +432,204 @@ class TestMLSmartSampler:
         assert len(results) == 0
         # frame_count 不应递增（None/空帧被跳过）
         assert sampler.frame_count == 0
+
+    # ==================================================================
+    # 首帧输出测试
+    # ==================================================================
+
+    def test_first_frame_is_output(self):
+        """首帧应该被输出（周期触发模式）。"""
+        sampler = MLSmartSampler()
+        frames = [(_make_natural_frame(seed=0), 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert len(results) == 1, "首帧应该被输出"
+        assert results[0]['frame_index'] == 0, "首帧的 frame_index 应为 0"
+
+    def test_first_frame_source_is_time(self):
+        """首帧的 source 应为 ['periodic']（周期触发语义）。"""
+        sampler = MLSmartSampler()
+        frames = [(_make_natural_frame(seed=0), 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert results[0]['source'] == ['periodic'], \
+            f"首帧 source 应为 ['periodic']，实际: {results[0]['source']}"
+
+    def test_first_frame_not_significant(self):
+        """首帧的 significant 应为 False（周期触发非显著帧）。"""
+        sampler = MLSmartSampler()
+        frames = [(_make_natural_frame(seed=0), 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert results[0]['significant'] is False, \
+            "首帧 significant 应为 False"
+
+    def test_first_frame_no_crop(self):
+        """首帧不裁剪，输出整帧。"""
+        sampler = MLSmartSampler()
+        frame = _make_natural_frame(seed=0)
+        h, w = frame.shape[:2]
+        frames = [(frame, 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        result = results[0]
+        assert 'cropped_frame' in result
+        assert 'bbox' in result
+        assert result['bbox'] == (0, 0, w, h), \
+            f"首帧 bbox 应为整帧，实际: {result['bbox']}"
+        assert result['compression_ratio'] == 1.0, \
+            "首帧 compression_ratio 应为 1.0"
+        # cropped_frame 应与 original_frame 相同
+        np.testing.assert_array_equal(result['cropped_frame'], result['original_frame'])
+
+    def test_first_frame_change_metrics(self):
+        """首帧 change_metrics 应为初始值。"""
+        sampler = MLSmartSampler()
+        frames = [(_make_natural_frame(seed=0), 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        metrics = results[0]['change_metrics']
+        assert metrics['ssim_score'] == 1.0, \
+            f"首帧 ssim_score 应为 1.0，实际: {metrics['ssim_score']}"
+        assert metrics['combined_score'] == 0.0, \
+            f"首帧 combined_score 应为 0.0，实际: {metrics['combined_score']}"
+        assert metrics['motion_score'] == 0.0, \
+            f"首帧 motion_score 应为 0.0，实际: {metrics['motion_score']}"
+
+    def test_first_frame_is_first_result(self):
+        """首帧应为第一个输出结果。"""
+        sampler = MLSmartSampler(
+            min_frame_interval=0.0,
+            backup_interval=1.0,
+        )
+        frames = [(_make_natural_frame(seed=i * 100), float(i) * 2.0) for i in range(10)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert len(results) > 0, "应有输出"
+        assert results[0]['frame_index'] == 0, "第一个输出应为首帧（frame_index=0）"
+        assert results[0]['timestamp'] == 0.0, "第一个输出的时间戳应为 0.0"
+
+    def test_single_image_input(self):
+        """单张图片输入应正确处理（回放场景兼容）。"""
+        sampler = MLSmartSampler()
+        # 模拟单张图片输入
+        frame = _make_natural_frame(seed=42)
+        frames = [(frame, 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert len(results) == 1, "单张图片应有 1 个输出"
+        result = results[0]
+        assert result['frame_index'] == 0
+        assert result['source'] == ['periodic']
+        assert result['significant'] is False
+        assert 'image' in result
+        assert result['image'].mode == 'RGB'  # PIL Image 应为 RGB 模式
+
+    def test_first_frame_sets_periodic_timestamp(self):
+        """首帧输出后，周期触发的计时起点应正确设置。"""
+        sampler = MLSmartSampler(backup_interval=5.0)
+        # 首帧
+        frames = [(_make_natural_frame(seed=0), 0.0)]
+        results = list(sampler.sample(iter(frames)))
+        assert len(results) == 1
+
+        # 继续输入，确认周期触发计时正确
+        # 在 backup_interval 之内不应触发周期
+        more_frames = [(_make_natural_frame(seed=i), float(i)) for i in range(1, 4)]
+        results2 = list(sampler.sample(iter(more_frames)))
+
+        # 由于时间间隔小于 backup_interval(5.0)，不应有纯周期触发
+        # 但可能有其他触发（运动、场景切换等）
+        for r in results2:
+            if r['source'] == ['periodic']:
+                # 如果是纯周期触发，时间戳应 >= 5.0
+                assert r['timestamp'] >= 5.0, \
+                    f"周期触发时间戳应 >= 5.0，实际: {r['timestamp']}"
+
+    def test_first_frame_with_different_resolutions(self):
+        """不同分辨率的首帧都能正确输出。"""
+        resolutions = [(640, 480), (1920, 1080), (320, 240)]
+
+        for w, h in resolutions:
+            sampler = MLSmartSampler()
+            frame = _make_natural_frame(h=h, w=w, seed=0)
+            frames = [(frame, 0.0)]
+            results = list(sampler.sample(iter(frames)))
+
+            assert len(results) == 1, f"分辨率 {w}x{h} 首帧应输出"
+            result = results[0]
+            assert result['bbox'] == (0, 0, w, h), \
+                f"分辨率 {w}x{h} bbox 不正确"
+            # 验证输出图像尺寸
+            assert result['image'].size == (w, h), \
+                f"输出图像尺寸应为 {w}x{h}，实际: {result['image'].size}"
+
+    def test_first_frame_pil_image_format(self):
+        """首帧输出的 PIL Image 格式应正确。"""
+        sampler = MLSmartSampler()
+        frame = _make_natural_frame(seed=0)
+        frames = [(frame, 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        from PIL import Image
+        pil_img = results[0]['image']
+        assert isinstance(pil_img, Image.Image), "应输出 PIL Image"
+        assert pil_img.mode == 'RGB', f"应为 RGB 模式，实际: {pil_img.mode}"
+
+    def test_first_frame_is_periodic_boundary(self):
+        """首帧的 source 应包含 'periodic'。"""
+        sampler = MLSmartSampler()
+        frame = _make_natural_frame(seed=0)
+        frames = [(frame, 0.0)]
+        results = list(sampler.sample(iter(frames)))
+
+        assert 'periodic' in results[0].get('source', []), \
+            "首帧 source 应包含 'periodic'"
+
+    def test_periodic_trigger_frame_is_boundary(self):
+        """周期触发帧的 source 应包含 'periodic'。"""
+        sampler = MLSmartSampler(
+            min_frame_interval=0.0,
+            backup_interval=2.0,  # 短周期便于测试
+        )
+        # 生成足够多的帧，确保有周期触发
+        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(10)]
+        results = list(sampler.sample(iter(frames)))
+
+        # 检查是否存在周期边界帧
+        periodic_boundary_frames = [r for r in results if 'periodic' in r.get('source', [])]
+        assert len(periodic_boundary_frames) > 0, "应有周期边界帧（source 包含 'periodic'）"
+
+    def test_non_periodic_frame_not_boundary(self):
+        """非周期触发帧的 source 不应包含 'periodic'。"""
+        sampler = MLSmartSampler(
+            min_frame_interval=0.0,
+            backup_interval=100.0,  # 长周期避免触发
+        )
+        # 生成有明显变化的帧，触发 motion 或 scene_switch
+        frames = []
+        for i in range(20):
+            # 每帧差异较大
+            frames.append((_make_natural_frame(seed=i * 1000), float(i * 0.5)))
+
+        results = list(sampler.sample(iter(frames)))
+
+        # 非首帧且非周期触发的帧，source 不应包含 'periodic'
+        for result in results[1:]:  # 跳过首帧
+            if 'motion' in result['source'] or 'scene_switch' in result['source']:
+                assert 'periodic' not in result['source'], \
+                    f"非周期触发帧 source 不应包含 'periodic'，source={result['source']}"
+
+    def test_disable_smart_sampling_not_periodic_boundary(self):
+        """禁用智能采样时，帧的 source 应为 ['traditional']。"""
+        sampler = MLSmartSampler(
+            enable_smart_sampling=False,
+            backup_interval=2.0,
+        )
+        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(10)]
+        results = list(sampler.sample(iter(frames)))
+
+        for result in results:
+            assert result['source'] == ['traditional'], \
+                f"禁用智能采样时 source 应为 ['traditional']，实际: {result['source']}"
+

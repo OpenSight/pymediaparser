@@ -295,7 +295,7 @@ class LivePipeline:
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': 'traditional',
+                        'source': ['traditional'],  # 传统固定间隔采样
                     }
 
                 # 队列满时丢弃旧帧
@@ -506,7 +506,7 @@ class LivePipeline:
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': 'processor',
+                        'source': ['processor'],  # 处理器模式
                     }
                     self._enqueue_frame(frame_data)
 
