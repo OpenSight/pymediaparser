@@ -520,13 +520,14 @@ class ReplayPipeline:
                             break
                         self._enqueue_frame(sampled_data)
                 else:
+                    # 无智能采样器，直接转换入队（防御性代码，理论上不应执行到此分支）
                     pil_image = self._numpy_to_pil(frame_np)
                     frame_data = {
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': ['processor'],  # 处理器模式
+                        'source': ['traditional'],  # 传统固定间隔采样
                     }
                     self._enqueue_frame(frame_data)
 
