@@ -131,12 +131,12 @@ def parse_args() -> argparse.Namespace:
     # ── VLM 配置 ─────────────────────────────────────────────
     vlm_group = parser.add_argument_group("VLM 模型配置")
     vlm_group.add_argument(
-        "--vlm-backend", default="qwen3",
-        help="VLM 后端名称: qwen2 / qwen3 / openai_api（默认: qwen3）",
+        "--vlm-backend", default="qwen35",
+        help="VLM 后端名称: qwen2 / qwen3 / qwen35 / openai_api（默认: qwen35）",
     )
     vlm_group.add_argument(
         "--model-path", default=None,
-        help="本地模型路径（默认: 项目内置 models/Qwen/Qwen3-VL-2B-Instruct）",
+        help="本地模型路径（默认: 项目内置 models/Qwen/Qwen3.5-0.8B）",
     )
     vlm_group.add_argument(
         "--device", default="cuda:0",

@@ -19,13 +19,30 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_MODEL_PATH = os.environ.get(
-    "VLM_MODEL_PATH",
-    os.environ.get(
-        "QWEN_VL_MODEL_PATH",
+
+# 默认模型路径：优先使用环境变量，否则按顺序尝试已存在的模型
+def _get_default_model_path() -> str:
+    """获取默认模型路径，按优先级尝试已存在的模型目录。"""
+    # 优先使用环境变量
+    env_path = os.environ.get("VLM_MODEL_PATH") or os.environ.get("QWEN_VL_MODEL_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+    
+    # 备选模型路径（按优先级排序）
+    candidates = [
+        os.path.join(_PROJECT_ROOT, "models", "Qwen", "Qwen3.5-0.8B"),
         os.path.join(_PROJECT_ROOT, "models", "Qwen", "Qwen3-VL-2B-Instruct"),
-    ),
-)
+        os.path.join(_PROJECT_ROOT, "models", "Qwen", "Qwen2-VL-2B-Instruct"),
+    ]
+    
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    
+    # 都不存在时返回第一个（保持向后兼容）
+    return candidates[0]
+
+DEFAULT_MODEL_PATH = _get_default_model_path()
 
 
 # ---------------------------------------------------------------------------

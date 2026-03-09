@@ -51,6 +51,7 @@ __all__ = [
     'VLMClient',
     'Qwen2VLClient',
     'Qwen3VLClient',
+    'Qwen35Client',
     'OpenAIAPIClient',
     # VLM 配置
     'LocalVLMConfig',
@@ -98,6 +99,7 @@ def __getattr__(name: str):
         # VLM 客户端（从 vlm 子包加载）
         'Qwen2VLClient':         ('.vlm.qwen2', 'Qwen2VLClient'),
         'Qwen3VLClient':         ('.vlm.qwen3', 'Qwen3VLClient'),
+        'Qwen35Client':          ('.vlm.qwen35', 'Qwen35Client'),
         'OpenAIAPIClient':       ('.vlm.openai_api', 'OpenAIAPIClient'),
         # VLM 配置
         'LocalVLMConfig':        ('.vlm.configs', 'LocalVLMConfig'),

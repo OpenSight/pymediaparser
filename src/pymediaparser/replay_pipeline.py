@@ -634,10 +634,8 @@ class ReplayPipeline(BasePipeline):
         images = [frame['image'] for frame in frames]
         significant_count = sum(1 for frame in frames if frame.get('significant'))
 
-        prompt = self._build_batch_prompt(frames, significant_count)
-
         try:
-            vlm_result = self.vlm_client.analyze_batch(images, prompt)
+            vlm_result = self.vlm_client.analyze_batch(images, self.prompt)
 
             processing_time = time.time() - start_time
             logger.info(
@@ -649,22 +647,6 @@ class ReplayPipeline(BasePipeline):
         except Exception as e:
             logger.error("批处理失败: %s", e, exc_info=True)
             return None
-
-    def _build_batch_prompt(self, frames: List[Dict[str, Any]], significant_count: int) -> str:
-        """构建批处理提示词。"""
-        total_frames = len(frames)
-
-        if significant_count > 0:
-            return (
-                f"请分析这{total_frames}帧图像序列，其中包含{significant_count}帧显著变化。"
-                f"请描述：1)主要的场景变化和事件发展；2)关键时间点的重要活动；"
-                f"3)整体趋势和可能的后续发展。"
-            )
-        else:
-            return (
-                f"请分析这{total_frames}帧连续图像，描述场景内容的演变趋势和发展规律。"
-                f"重点关注画面中的主体活动和环境变化。"
-            )
 
     def _flush_batch_buffer(self) -> None:
         """清空批处理缓冲区，处理剩余帧。"""
