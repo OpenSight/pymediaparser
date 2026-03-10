@@ -54,6 +54,8 @@ class FastTriggers:
         # 异常检测状态（滑动窗口）
         self._anomaly_window_size = 30
         self._feature_window: Deque[np.ndarray] = collections.deque(maxlen=self._anomaly_window_size)
+        # 用于异常检测运动强度计算的上一帧（相邻帧差异）
+        self._last_gray_for_anomaly: Optional[np.ndarray] = None
 
         # 周期采样状态
         self._last_periodic_ts: float = -float('inf')
@@ -89,7 +91,7 @@ class FastTriggers:
         small = cv2.resize(frame, (_TRIGGER_WIDTH, _TRIGGER_HEIGHT), interpolation=cv2.INTER_NEAREST)
         gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
-        # ── 首帧初始化：直接设置为参考帧，不触发任何事件 ──
+        # ── 首帧：初始化参考帧并以周期触发方式返回 ──
         if self._prev_gray_small is None:
             # 更新所有参考帧
             self._prev_gray_small = gray_small
@@ -101,10 +103,13 @@ class FastTriggers:
                 self._prev_phash = imagehash.phash(pil_img)
             except ImportError:
                 pass
-            # 更新周期采样的起始时间，避免首帧后立即触发 periodic
+            # 更新周期采样的起始时间
             self._last_periodic_ts = timestamp
-            logger.debug("首帧初始化完成，已设置为参考帧，不触发任何事件")
-            return []  # 首帧不触发
+            # 更新异常检测的相邻帧参考
+            self._last_gray_for_anomaly = gray_small.copy()
+            self._trigger_count += 1
+            logger.debug("[L1首帧] 自动触发 periodic")
+            return ['periodic']
 
         # 生成帧差掩码（供 scene_switch / anomaly / 裁剪使用）
         # 注意：此时使用的是上一次触发时的参考帧，而非上一帧
@@ -131,15 +136,17 @@ class FastTriggers:
         if self._check_periodic(timestamp):
             triggers.append('periodic')
 
-        # ⭐ 关键修复：只有触发时才更新参考帧，且根据触发类型选择性更新
+        # ⭐ 关键逻辑：只有触发时才更新参考帧，且根据触发类型选择性更新
         if triggers:
             self._trigger_count += 1
             
-            # 场景切换或异常触发 → 更新场景参考帧
+            # 所有触发类型都需要更新灰度参考帧（用于帧差计算）
+            # 原因：触发后，该帧应成为后续帧差计算的基准
+            self._prev_gray_small = gray_small
+            
+            # 场景切换或异常触发 → 额外更新场景参考帧
             # 原因：这两种情况说明场景本身发生了变化
             if 'scene_switch' in triggers or 'anomaly' in triggers:
-                # 更新灰度参考帧（用于下一轮的帧差计算）
-                self._prev_gray_small = gray_small
                 # 更新 HSV 直方图
                 hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
                 self._prev_hsv_hists = self._compute_block_histograms(hsv)
@@ -151,9 +158,8 @@ class FastTriggers:
                 except ImportError:
                     pass
             elif 'periodic' in triggers:
-                # 周期强制触发 → 更新所有参考帧
+                # 周期强制触发 → 额外更新场景参考帧
                 # 原因：长时间未采样，需要重置参考基准
-                self._prev_gray_small = gray_small
                 hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
                 self._prev_hsv_hists = self._compute_block_histograms(hsv)
                 try:
@@ -162,7 +168,12 @@ class FastTriggers:
                     self._prev_phash = imagehash.phash(pil_img)
                 except ImportError:
                     pass
-            # else: 'motion' only → 不更新场景参考帧
+            # 'motion' only → 只更新 _prev_gray_small，不更新场景参考帧
+            # 原因：运动不代表场景变化，但帧差基准需要更新
+        
+        # 更新用于异常检测的上一帧（始终更新，用于计算相邻帧差异）
+        self._last_gray_for_anomaly = gray_small.copy()
+        
         # 注意：last_diff_mask 始终保留，供 Layer 2 裁剪使用
         # 只有在 reset() 时才清除
 
@@ -174,6 +185,7 @@ class FastTriggers:
         self._prev_hsv_hists = None
         self._prev_phash = None
         self._feature_window.clear()
+        self._last_gray_for_anomaly = None
         self._last_periodic_ts = -float('inf')
         self._last_motion_score = 0.0
         self._last_fg_mask = None
@@ -272,8 +284,8 @@ class FastTriggers:
                 distance = curr_hash - self._prev_phash
                 # ⭐ 不在这里更新！由 detect() 在触发时统一更新
                 return distance > 15
-            # 首次调用时设置参考 hash
-            self._prev_phash = curr_hash
+            # _prev_phash 为 None 说明是首帧，但首帧已在 detect() 中初始化
+            # 如果到这里仍未初始化，说明 imagehash 在首帧时不可用，跳过检测
             return False
         except ImportError:
             # imagehash 不可用时跳过
@@ -301,10 +313,10 @@ class FastTriggers:
 
     def _extract_anomaly_features(self, gray_small: np.ndarray) -> np.ndarray:
         """提取三维特征向量: [运动强度, 颜色方差, 边缘密度]。"""
-        # 运动强度：与上一帧的差分均值
+        # 运动强度：与上一帧的差分均值（使用相邻帧差异，而非参考帧差异）
         motion_intensity = 0.0
-        if self._prev_gray_small is not None:
-            diff = cv2.absdiff(gray_small, self._prev_gray_small)
+        if self._last_gray_for_anomaly is not None:
+            diff = cv2.absdiff(gray_small, self._last_gray_for_anomaly)
             motion_intensity = float(np.mean(diff))
 
         # 颜色方差

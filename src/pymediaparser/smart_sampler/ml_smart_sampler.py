@@ -44,7 +44,6 @@ class MLSmartSampler(SmartSampler):
             min_frame_interval=min_frame_interval,
         )
         self._yield_count: int = 0
-        self._is_initialized: bool = False  # 标记是否已用首帧初始化参考
 
         # Layer 0: 硬性过滤器
         self.hard_filter = HardFilter(
@@ -119,14 +118,6 @@ class MLSmartSampler(SmartSampler):
                     self._last_emit_ts = ts
                 continue
 
-            # ── 首帧初始化 ──
-            # 首帧初始化 L0/L1/L2 参考帧，并以周期触发模式输出
-            if not self._is_initialized:
-                result = self._initialize_with_first_frame(frame_np, ts, current_frame_idx)
-                self._yield_count += 1
-                yield result
-                continue
-
             # ── Layer 0: 硬过滤 ──
             passed, reason = self.hard_filter.check(frame_np, ts)
             if not passed:
@@ -169,7 +160,6 @@ class MLSmartSampler(SmartSampler):
         self._last_emit_ts = -float('inf')
         self._input_frame_count = 0
         self._yield_count = 0
-        self._is_initialized = False  # 重置初始化标志
         self.hard_filter.reset()
         self.fast_triggers.reset()
         self.frame_validator.reset()
@@ -193,52 +183,6 @@ class MLSmartSampler(SmartSampler):
         }
 
     # ── 内部方法 ──────────────────────────────────────
-
-    def _initialize_with_first_frame(
-        self,
-        frame_np: np.ndarray,
-        ts: float,
-        frame_idx: int,
-    ) -> Dict[str, Any]:
-        """用首帧初始化 L0、L1、L2 层的参考帧，并以周期触发模式输出。
-
-        首帧作为参考帧初始化各层状态，同时作为第一个周期触发帧输出到 VLM。
-        适用于实时流和回放场景，保证语义一致性。
-        """
-        logger.info(
-            "[首帧初始化] 帧#%d | ts=%.3fs | 作为参考帧初始化L0/L1/L2，以周期触发模式输出",
-            frame_idx, ts,
-        )
-
-        # 初始化 L0: HardFilter 需要前一帧用于静止帧检测
-        self.hard_filter.check(frame_np, ts)  # 首帧直接通过，保存为参考
-
-        # 初始化 L1: FastTriggers 需要前一帧用于差异检测
-        # 注意：detect() 会设置 _last_periodic_ts = ts，确保后续周期触发正确计时
-        self.fast_triggers.detect(frame_np, ts)  # 建立 phash、直方图等参考
-
-        # 初始化 L2: FrameValidator 需要参考帧用于 SSIM、光流等
-        self.frame_validator.update_reference(frame_np)
-
-        self._is_initialized = True
-        self._last_emit_ts = ts
-
-        # 构建首帧输出结果（周期触发模式）
-        pil_image = self._numpy_to_pil(frame_np)
-
-        return {
-            'image': pil_image,
-            'timestamp': ts,
-            'frame_index': frame_idx,
-            'significant': False,  # 周期触发非显著帧
-            'source': ['periodic'],  # 首帧为周期触发
-            'original_frame': frame_np,
-            'change_metrics': {
-                'ssim_score': 1.0,  # 无参考帧，默认完全相似
-                'combined_score': 0.0,  # 无变化
-                'motion_score': 0.0,  # 无运动
-            },
-        }
 
     def _build_result(
         self,
@@ -272,9 +216,6 @@ class MLSmartSampler(SmartSampler):
                 'motion_score': motion_score,
             },
         }
-
-        # 更新验证器参考帧
-        self.frame_validator.update_reference(frame_np)
 
         # 日志（扩展格式）
         has_motion = 'motion' in triggers

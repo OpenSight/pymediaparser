@@ -70,6 +70,8 @@ class FrameValidator:
     ) -> Dict[str, Any]:
         """对候选帧进行多特征融合验证。
 
+        验证通过时自动更新参考帧，无需外部调用 update_reference()。
+
         Args:
             frame: BGR 格式图像帧。
             timestamp: 帧时间戳。
@@ -83,10 +85,20 @@ class FrameValidator:
             - is_peak: 是否为峰值
             - window_mean: 窗口均值
         """
-        # 周期强制触发直接通过
-        if triggers == ['periodic']:
+        # 提取灰度图（所有路径都需要）
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_small = cv2.resize(gray, (_FLOW_WIDTH, _FLOW_HEIGHT), interpolation=cv2.INTER_AREA)
+
+        # 首帧或周期触发：直接通过并更新参考帧
+        is_first_frame = self._prev_gray_small is None
+        is_periodic = triggers == ['periodic']
+        if is_first_frame or is_periodic:
             self._pass_count += 1
             self._last_pass_ts = timestamp
+            self._update_prev_states(gray_small)
+            self._reference_grays.append(gray_small.copy())
+            reason = "首帧" if is_first_frame else "周期触发"
+            logger.debug("[L2%s] 自动通过 | 历史帧数=%d", reason, len(self._reference_grays))
             return {
                 'passed': True,
                 'score': 0.5,
@@ -96,9 +108,6 @@ class FrameValidator:
             }
 
         # 提取特征
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_small = cv2.resize(gray, (_FLOW_WIDTH, _FLOW_HEIGHT), interpolation=cv2.INTER_AREA)
-
         features = self._extract_features(gray_small, triggers)
 
         # 动态权重调整
@@ -163,7 +172,14 @@ class FrameValidator:
             self._last_pass_ts = timestamp
             self._last_pass_score = score
             self._pass_count += 1
-            # 参考帧状态更新由 update_reference() 统一完成
+
+        # 每次验证后都更新相邻帧状态（用于下一帧的特征计算）
+        self._update_prev_states(gray_small)
+
+        # 验证通过时自动更新参考帧
+        if passed:
+            self._reference_grays.append(gray_small.copy())
+            logger.debug("[L2验证通过] 已更新参考帧 | 历史帧数=%d", len(self._reference_grays))
 
         # 过滤内部字段
         clean_features = {k: v for k, v in features.items() if not k.startswith('_')}
@@ -177,23 +193,46 @@ class FrameValidator:
         }
 
     def update_reference(self, frame: np.ndarray) -> None:
-        """手动添加参考帧，初始化所有必要的状态。"""
+        """手动设置参考帧（可选）。
+
+        首帧会自动检测并通过，无需预先调用此方法。
+
+        适用场景：
+        - 场景切换后强制重置参考帧
+        - 外部需要强制设置特定帧作为参考
+        """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray_small = cv2.resize(gray, (_FLOW_WIDTH, _FLOW_HEIGHT), interpolation=cv2.INTER_AREA)
 
         # 更新参考帧列表
         self._reference_grays.append(gray_small.copy())
 
-        # 更新前一帧灰度图（用于光流等计算）
+        # 更新相邻帧状态
+        self._update_prev_states(gray_small)
+
+        logger.debug(
+            "[L2] 手动设置参考帧 | 历史帧数=%d",
+            len(self._reference_grays),
+        )
+
+    def _update_prev_states(self, gray_small: np.ndarray) -> None:
+        """更新前一帧状态（每次验证后调用，用于下一帧的特征计算）。
+
+        更新内容：
+        - _prev_gray_small: 用于光流计算
+        - _prev_edges: 用于边缘IoU计算
+        - _prev_phash: 用于感知哈希距离计算
+        """
+        # 更新前一帧灰度图
         self._prev_gray_small = gray_small.copy()
 
-        # 更新前一帧边缘图（用于结构变化检测）
-        edges = cv2.Sobel(gray_small, cv2.CV_64F, 1, 0, ksize=3)
-        edges_y = cv2.Sobel(gray_small, cv2.CV_64F, 0, 1, ksize=3)
-        edge_mag = np.sqrt(edges ** 2 + edges_y ** 2)
+        # 更新前一帧边缘图
+        sobel_x = cv2.Sobel(gray_small, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray_small, cv2.CV_64F, 0, 1, ksize=3)
+        edge_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
         self._prev_edges = (edge_mag > 50).astype(np.uint8)
 
-        # 更新感知哈希（用于内容语义检测）
+        # 更新感知哈希
         try:
             import imagehash
             from PIL import Image
@@ -201,11 +240,6 @@ class FrameValidator:
             self._prev_phash = imagehash.phash(pil_img)
         except ImportError:
             pass
-
-        logger.debug(
-            "[L2] 参考帧已更新 | 历史帧数=%d",
-            len(self._reference_grays),
-        )
 
     def reset(self) -> None:
         """重置验证器状态。"""
