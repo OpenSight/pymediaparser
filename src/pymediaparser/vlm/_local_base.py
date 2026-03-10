@@ -12,7 +12,14 @@ import time
 from abc import abstractmethod
 from typing import Any, Dict, List, Sequence, Tuple
 
-import torch
+# 延迟导入：torch 是可选依赖（仅本地 VLM 后端需要）
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    torch = None  # type: ignore[assignment,misc]
+    _TORCH_AVAILABLE = False
+
 from PIL import Image
 
 from ..vlm_base import VLMClient, VLMConfig, VLMResult
@@ -20,14 +27,18 @@ from ..vlm_base import VLMClient, VLMConfig, VLMResult
 logger = logging.getLogger(__name__)
 
 # torch dtype 映射（统一维护，子类共用）
-_DTYPE_MAP: dict[str, torch.dtype] = {
-    "float16": torch.float16,
-    "fp16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "bf16": torch.bfloat16,
-    "float32": torch.float32,
-    "fp32": torch.float32,
-}
+# 仅在 torch 可用时定义
+if _TORCH_AVAILABLE:
+    _DTYPE_MAP: dict[str, Any] = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+else:
+    _DTYPE_MAP = {}
 
 
 class _LocalTransformersBase(VLMClient):
