@@ -552,8 +552,8 @@ class LivePipeline(BasePipeline):
             idx = last_frame['frame_index']
             batch_count = len(batch_frames)
         else:
-            # 单帧推理
-            vlm_result = self.vlm_client.analyze(image, self.prompt)
+            # 单帧推理：直接传递帧信息字典
+            vlm_result = self.vlm_client.analyze(item, self.prompt)
 
         # 错误处理
         if vlm_result is None:
@@ -585,13 +585,11 @@ class LivePipeline(BasePipeline):
     def _process_batch(self, frames: List[Dict[str, Any]]) -> Optional[VLMResult]:
         """批量处理帧列表。"""
         start_time = time.time()
-
-        images = [frame['image'] for frame in frames]
         significant_count = sum(1 for frame in frames if frame.get('significant'))
 
-        # 执行批量推理
+        # 执行批量推理：直接传递帧信息字典列表
         try:
-            vlm_result = self.vlm_client.analyze_batch(images, self.prompt)
+            vlm_result = self.vlm_client.analyze_batch(frames, self.prompt)
 
             processing_time = time.time() - start_time
             logger.info(

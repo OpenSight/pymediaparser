@@ -7,10 +7,12 @@
 
     from pymediaparser.vlm_base import VLMConfig
     from pymediaparser.vlm.qwen3 import Qwen3VLClient
+    from PIL import Image
 
     config = VLMConfig(model_path="/path/to/Qwen3-VL-2B", device="cuda:0")
     with Qwen3VLClient(config) as client:
-        result = client.analyze(pil_image, "请描述画面内容。")
+        frame = {'image': Image.open('test.jpg'), 'frame_index': 0, 'timestamp': 0.0}
+        result = client.analyze(frame, "请描述画面内容。")
         print(result.text)
 """
 

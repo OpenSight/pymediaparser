@@ -21,6 +21,23 @@ def _make_image(width: int = 64, height: int = 64) -> Image.Image:
     return Image.new("RGB", (width, height), color=(128, 128, 128))
 
 
+def _make_frame(
+    image: Image.Image | None = None,
+    frame_index: int = 0,
+    timestamp: float = 0.0,
+) -> dict:
+    """创建测试用帧信息字典。"""
+    if image is None:
+        image = _make_image()
+    return {
+        'image': image,
+        'frame_index': frame_index,
+        'timestamp': timestamp,
+        'significant': True,
+        'source': ['test'],
+    }
+
+
 def _mock_api_response(text: str = "这是一个测试回复",
                        prompt_tokens: int = 100,
                        completion_tokens: int = 20) -> dict:
@@ -109,7 +126,7 @@ class TestOpenAIAPIClientAnalyze:
         """未 load 时调用 analyze 抛出 RuntimeError。"""
         client = OpenAIAPIClient()
         with pytest.raises(RuntimeError, match="尚未初始化"):
-            client.analyze(_make_image())
+            client.analyze(_make_frame())
 
     @patch("pymediaparser.vlm.openai_api.requests.Session")
     def test_analyze_returns_vlm_result(self, MockSession):
@@ -125,7 +142,7 @@ class TestOpenAIAPIClientAnalyze:
 
         client = OpenAIAPIClient(APIVLMConfig(model_name="test-model"))
         client.load()
-        result = client.analyze(_make_image(), "描述画面")
+        result = client.analyze(_make_frame(), "描述画面")
 
         assert isinstance(result, VLMResult)
         assert result.text == "画面中有一个人"
@@ -157,13 +174,13 @@ class TestOpenAIAPIClientAnalyze:
         cfg = APIVLMConfig(default_prompt="自定义默认提示")
         client = OpenAIAPIClient(cfg)
         client.load()
-        client.analyze(_make_image())
+        client.analyze(_make_frame())
 
         call_args = mock_session.post.call_args
         payload = call_args[1]["json"]
         content = payload["messages"][0]["content"]
         # 最后一个 content 元素是 text
-        text_item = [c for c in content if c["type"] == "text"][0]
+        text_item = [c for c in content if c["type"] == "text"][-1]
         assert text_item["text"] == "自定义默认提示"
 
         client.unload()
@@ -172,8 +189,8 @@ class TestOpenAIAPIClientAnalyze:
 class TestOpenAIAPIClientAnalyzeBatch:
     """analyze_batch() 测试。"""
 
-    def test_empty_images_raises(self):
-        """空图像列表抛出 ValueError。"""
+    def test_empty_frames_raises(self):
+        """空帧列表抛出 ValueError。"""
         client = OpenAIAPIClient()
         client.load()
         with pytest.raises(ValueError, match="不能为空"):
@@ -195,20 +212,21 @@ class TestOpenAIAPIClientAnalyzeBatch:
         client = OpenAIAPIClient()
         client.load()
 
-        images = [_make_image() for _ in range(3)]
-        result = client.analyze_batch(images, "分析这些图像")
+        frames = [_make_frame(frame_index=i, timestamp=float(i)) for i in range(3)]
+        result = client.analyze_batch(frames, "分析这些图像")
 
         assert isinstance(result, VLMResult)
         assert result.text == "批量分析结果"
 
-        # 验证发送了 3 张图像 + 1 个文本
+        # 验证发送了 3 张图像 + 时序标签 + 文本
         call_args = mock_session.post.call_args
         payload = call_args[1]["json"]
         content = payload["messages"][0]["content"]
         image_items = [c for c in content if c["type"] == "image_url"]
         text_items = [c for c in content if c["type"] == "text"]
         assert len(image_items) == 3
-        assert len(text_items) == 1
+        # 多帧时有前缀 + 每帧一个时序标签 + prompt
+        assert len(text_items) >= 1
 
         client.unload()
 

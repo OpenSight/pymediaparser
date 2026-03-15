@@ -605,8 +605,8 @@ class ReplayPipeline(BasePipeline):
             batch_count = len(batch_frames)
             item = last_frame
         else:
-            # 单帧推理
-            vlm_result = self.vlm_client.analyze(image, self.prompt)
+            # 单帧推理：直接传递帧信息字典
+            vlm_result = self.vlm_client.analyze(item, self.prompt)
 
         if vlm_result is None:
             return
@@ -662,12 +662,11 @@ class ReplayPipeline(BasePipeline):
     def _process_batch(self, frames: List[Dict[str, Any]]) -> Optional[VLMResult]:
         """批量处理帧列表。"""
         start_time = time.time()
-
-        images = [frame['image'] for frame in frames]
         significant_count = sum(1 for frame in frames if frame.get('significant'))
 
         try:
-            vlm_result = self.vlm_client.analyze_batch(images, self.prompt)
+            # 执行批量推理：直接传递帧信息字典列表
+            vlm_result = self.vlm_client.analyze_batch(frames, self.prompt)
 
             processing_time = time.time() - start_time
             logger.info(

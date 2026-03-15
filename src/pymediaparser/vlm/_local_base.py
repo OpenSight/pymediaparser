@@ -146,7 +146,11 @@ class _LocalTransformersBase(VLMClient):
 
         logger.info("模型加载完成")
 
-    def analyze(self, image: Image.Image, prompt: str | None = None) -> VLMResult:
+    def analyze(
+        self,
+        frame: Dict[str, Any],
+        prompt: str | None = None,
+    ) -> VLMResult:
         """对单帧图像进行 VLM 推理。"""
         if self._model is None or self._processor is None:
             raise RuntimeError("模型尚未加载，请先调用 load()")
@@ -154,16 +158,9 @@ class _LocalTransformersBase(VLMClient):
         prompt = prompt or self.config.default_prompt
         t0 = time.perf_counter()
 
-        # 构造多模态消息
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+        # 构造消息（单帧也有时序信息）
+        content = self._build_content_with_timing([frame], prompt)
+        messages = [{"role": "user", "content": content}]
 
         # 子类实现输入准备
         inputs = self._prepare_inputs(messages)
@@ -179,6 +176,7 @@ class _LocalTransformersBase(VLMClient):
                 max_new_tokens=self.config.max_new_tokens,
                 do_sample=False,
                 use_cache=True,
+                pad_token_id=self._processor.tokenizer.eos_token_id,
             )
 
         # 解码输出
@@ -206,10 +204,14 @@ class _LocalTransformersBase(VLMClient):
             inference_time=elapsed,
         )
 
-    def analyze_batch(self, images: Sequence[Image.Image], prompt: str | None = None) -> VLMResult:
+    def analyze_batch(
+        self,
+        frames: Sequence[Dict[str, Any]],
+        prompt: str | None = None,
+    ) -> VLMResult:
         """对多张图像进行批量 VLM 推理。"""
-        if not images:
-            raise ValueError("图像列表不能为空")
+        if not frames:
+            raise ValueError("帧信息列表不能为空")
 
         if self._model is None or self._processor is None:
             raise RuntimeError("模型尚未加载，请先调用 load()")
@@ -217,11 +219,8 @@ class _LocalTransformersBase(VLMClient):
         prompt = prompt or self.config.default_prompt
         start_time = time.perf_counter()
 
-        # 构造多图像消息
-        content: List[Dict[str, Any]] = []
-        for img in images:
-            content.append({"type": "image", "image": img})
-        content.append({"type": "text", "text": prompt})
+        # 使用辅助方法构建消息
+        content = self._build_content_with_timing(frames, prompt)
         messages = [{"role": "user", "content": content}]
 
         # 子类实现输入准备
@@ -239,6 +238,7 @@ class _LocalTransformersBase(VLMClient):
                 temperature=getattr(self.config, "temperature", 0.7),
                 do_sample=getattr(self.config, "do_sample", True),
                 use_cache=True,
+                pad_token_id=self._processor.tokenizer.eos_token_id,
             )
 
         # 解码输出
@@ -257,8 +257,8 @@ class _LocalTransformersBase(VLMClient):
         output_tokens = len(generated_ids_trimmed[0])
 
         logger.debug(
-            "批量处理完成 - 图像数: %d, 输入tokens: %d, 输出tokens: %d, 耗时: %.2fs",
-            len(images), input_tokens, output_tokens, inference_time,
+            "批量处理完成 - 帧数: %d, 输入tokens: %d, 输出tokens: %d, 耗时: %.2fs",
+            len(frames), input_tokens, output_tokens, inference_time,
         )
 
         return VLMResult(
@@ -288,38 +288,84 @@ class _LocalTransformersBase(VLMClient):
 
     def analyze_with_context(
         self,
-        images: List[Image.Image],
+        frames: Sequence[Dict[str, Any]],
         context_prompt: str | None = None,
     ) -> VLMResult:
         """带上下文的批量分析。
 
         Args:
-            images: PIL 图像列表。
+            frames: 帧信息字典列表。
             context_prompt: 上下文提示词，为 None 时自动生成。
 
         Returns:
             分析结果 VLMResult。
         """
         if context_prompt is None:
-            context_prompt = self._build_context_prompt(len(images))
-        return self.analyze_batch(images, context_prompt)
+            context_prompt = self._build_context_prompt(len(frames))
+        return self.analyze_batch(frames, context_prompt)
 
     @staticmethod
-    def _build_context_prompt(image_count: int) -> str:
-        """根据图像数量构建上下文提示词。"""
-        if image_count == 1:
+    def _build_context_prompt(frame_count: int) -> str:
+        """根据帧数量构建上下文提示词。"""
+        if frame_count == 1:
             return "请详细分析这张图像的内容。"
-        elif image_count <= 3:
-            return f"请分析这{image_count}张图像，描述它们之间的关系和变化。"
+        elif frame_count <= 3:
+            return f"请分析这{frame_count}张图像，描述它们之间的关系和变化。"
         else:
             return (
-                f"请分析这{image_count}帧连续图像序列，"
+                f"请分析这{frame_count}帧连续图像序列，"
                 f"描述场景的发展变化和重要事件。"
             )
 
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _build_content_with_timing(
+        self,
+        frames: Sequence[Dict[str, Any]],
+        prompt: str,
+    ) -> List[Dict[str, Any]]:
+        """构建带时序标签的消息内容（穿插方式）。
+
+        Args:
+            frames: 帧信息字典列表，包含 image、frame_index 和 timestamp。
+            prompt: 提示词。
+
+        Returns:
+            消息内容列表，图像与时序标签穿插排列。
+        """
+        content: List[Dict[str, Any]] = []
+
+        # 多帧时添加前缀
+        if len(frames) > 1:
+            content.append({
+                "type": "text",
+                "text": self.config.timing_prefix
+            })
+
+        # 穿插方式：图像 → 时序标签
+        for frame in frames:
+            img = frame.get('image')
+            # 类型安全转换，避免 None 或非数值类型导致 format 异常
+            try:
+                index = int(frame.get('frame_index', 0) or 0)
+            except (TypeError, ValueError):
+                index = 0
+            try:
+                timestamp = float(frame.get('timestamp', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+
+            timing_text = self.config.timing_format.format(
+                index=index,
+                timestamp=timestamp
+            )
+            content.append({"type": "image", "image": img})
+            content.append({"type": "text", "text": timing_text})
+
+        content.append({"type": "text", "text": prompt})
+        return content
 
     def _get_default_prompt(self) -> str:
         """获取默认提示词。"""
