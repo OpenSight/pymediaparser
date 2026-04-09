@@ -94,6 +94,7 @@ class MockResultHandler:
     def __init__(self):
         self.on_start_called = False
         self.on_stop_called = False
+        self.on_complete_called = False
         self.results = []
 
     def on_start(self):
@@ -101,6 +102,9 @@ class MockResultHandler:
 
     def on_stop(self):
         self.on_stop_called = True
+
+    def on_complete(self):
+        self.on_complete_called = True
 
     def handle(self, frame_result):
         self.results.append(frame_result)
@@ -137,7 +141,7 @@ class TestReplayPipelineVideo:
         assert vlm_client.load_called
         assert vlm_client.unload_called
         assert handler.on_start_called
-        assert handler.on_stop_called
+        assert handler.on_complete_called, "正常完成时应调用 on_complete"
         assert len(handler.results) > 0, "应有分析结果"
 
     def test_video_no_frame_loss(self):
@@ -266,7 +270,7 @@ class TestReplayPipelineHandlers:
         thread.join(timeout=60)
 
         assert handler.on_start_called, "on_start 应被调用"
-        assert handler.on_stop_called, "on_stop 应被调用"
+        assert handler.on_complete_called, "正常完成时应调用 on_complete"
 
     def test_frame_results(self):
         """FrameResult 应包含正确字段。"""
