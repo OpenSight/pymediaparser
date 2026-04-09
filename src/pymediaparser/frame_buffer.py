@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import logging
+import time
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from collections import deque
@@ -42,6 +43,7 @@ class FrameBuffer:
         self.max_size = max_size
         self.max_wait_time = max_wait_time
         self.buffer: deque[BufferedFrame] = deque(maxlen=max_size)
+        self._first_frame_time: float = 0.0  # 缓冲区首帧的入队时间
         logger.debug("FrameBuffer 初始化完成 - max_size=%d, max_wait_time=%.1fs", 
                     max_size, max_wait_time)
 
@@ -94,6 +96,10 @@ class FrameBuffer:
                 )
         
         # 新帧入队
+        # 记录首帧入队时间（缓冲区从空变为非空）
+        if len(self.buffer) == 0:
+            self._first_frame_time = time.time()
+        
         buffered_frame = BufferedFrame(
             frame_data=frame_data,
             timestamp=new_timestamp,
@@ -117,6 +123,7 @@ class FrameBuffer:
         """准备批次，返回所有缓冲帧"""
         result = [f.frame_data for f in self.buffer]
         self.buffer.clear()
+        self._first_frame_time = 0.0  # 重置首帧时间
         return result
 
     def clear(self) -> None:
@@ -151,6 +158,17 @@ class FrameBuffer:
         self.clear()
         logger.info("强制清空缓冲区 - 帧数: %d", len(frames_data))
         return frames_data
+
+    def is_timeout(self) -> bool:
+        """检查缓冲区首帧是否超时
+        
+        Returns:
+            True: 缓冲区非空且首帧等待时间 >= max_wait_time
+            False: 缓冲区为空或首帧等待时间 < max_wait_time
+        """
+        if not self.buffer:
+            return False
+        return (time.time() - self._first_frame_time) >= self.max_wait_time
 
     def __len__(self) -> int:
         return len(self.buffer)

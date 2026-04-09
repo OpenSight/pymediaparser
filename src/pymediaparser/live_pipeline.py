@@ -505,6 +505,9 @@ class LivePipeline(BasePipeline):
                 try:
                     item = self._queue.get(timeout=1.0)
                 except queue.Empty:
+                    # 超时检查：定期flush批处理缓冲区
+                    if self.frame_buffer and self.frame_buffer.is_timeout():
+                        self._flush_batch_buffer(reason="timeout")
                     continue
 
                 # sentinel 检测
@@ -604,14 +607,22 @@ class LivePipeline(BasePipeline):
             logger.error("批处理失败: %s", e, exc_info=True)
             return None
 
-    def _flush_batch_buffer(self) -> None:
-        """清空批处理缓冲区，处理剩余帧。"""
+    def _flush_batch_buffer(self, reason: str = "shutdown") -> None:
+        """清空批处理缓冲区，处理剩余帧。
+        
+        Args:
+            reason: flush原因，"timeout"=运行中超时触发，"shutdown"=停止时清理
+        """
         if not self.frame_buffer:
             return
 
         batch_frames = self.frame_buffer.flush()
         if batch_frames:
-            logger.info("处理缓冲区剩余帧 - 帧数: %d", len(batch_frames))
+            if reason == "timeout":
+                logger.info("[超时flush] 处理缓冲区帧 - 帧数: %d", len(batch_frames))
+            else:
+                logger.info("处理缓冲区剩余帧 - 帧数: %d", len(batch_frames))
+            
             vlm_result = self._process_batch(batch_frames)
             if vlm_result:
                 last_frame = batch_frames[-1]
