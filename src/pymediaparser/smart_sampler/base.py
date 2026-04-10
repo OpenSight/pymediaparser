@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, Iterator
 
 import cv2
@@ -10,6 +11,20 @@ import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BaseSamplerConfig:
+    """采样器配置基类 - 所有采样器配置的公共字段"""
+
+    enable_smart_sampling: bool = True
+    """是否启用智能采样"""
+
+    backup_interval: float = 30.0
+    """保底间隔（秒），画面无变化时强制采样"""
+
+    min_frame_interval: float = 1.0
+    """最小帧间隔（秒），防止过于频繁采样"""
 
 
 class SmartSampler(ABC):

@@ -34,7 +34,7 @@ from .vlm_base import FrameResult, StreamConfig, VLMClient, VLMResult
 
 # 智能功能导入（可选）
 try:
-    from .smart_sampler import SmartSampler, MLSmartSampler
+    from .smart_sampler import SmartSampler, BaseSamplerConfig, create_sampler
     from .frame_buffer import FrameBuffer
     _SMART_FEATURES_AVAILABLE = True
 except ImportError:
@@ -79,9 +79,12 @@ class ReplayPipeline(BasePipeline):
         vlm_client: VLM 推理客户端实例。
         handlers: 结果处理器列表；为空时默认使用 ConsoleResultHandler。
         prompt: VLM 推理提示词；为 None 时使用 VLMConfig 中的默认 prompt。
-        enable_smart_sampling: 是否启用智能采样。
+        smart_sampler: 智能采样器类型（'simple' 或 'ml'），为 None 时不启用智能采样。
+        smart_config: 智能采样器配置对象或配置字典。
         enable_batch_processing: 是否启用批量处理。
-        smart_config: 智能功能配置字典。
+        batch_config: 批量处理配置字典。
+        preprocessing: 图像预处理策略名称。
+        preprocess_config: 图像预处理配置对象。
     """
 
     def __init__(
@@ -90,10 +93,12 @@ class ReplayPipeline(BasePipeline):
         vlm_client: VLMClient,
         handlers: Sequence[ResultHandler] | None = None,
         prompt: str | None = None,
-        # 智能功能参数
-        enable_smart_sampling: bool = False,
+        # 智能采样参数（新设计）
+        smart_sampler: Optional[str] = None,
+        smart_config: Union[BaseSamplerConfig, Dict[str, Any], None] = None,
+        # 批处理参数
         enable_batch_processing: bool = False,
-        smart_config: Optional[Dict[str, Any]] = None,
+        batch_config: Optional[Dict[str, Any]] = None,
         # 图像预处理参数
         preprocessing: Optional[str] = None,
         preprocess_config: Union[ResizeConfig, ROICropConfig, None] = None,
@@ -107,10 +112,10 @@ class ReplayPipeline(BasePipeline):
         self.prompt = prompt
 
         # 智能功能开关
-        self.enable_smart_sampling = enable_smart_sampling and _SMART_FEATURES_AVAILABLE
+        self.enable_smart_sampling = smart_sampler is not None and _SMART_FEATURES_AVAILABLE
         self.enable_batch_processing = enable_batch_processing and _SMART_FEATURES_AVAILABLE
 
-        if (enable_smart_sampling or enable_batch_processing) and not _SMART_FEATURES_AVAILABLE:
+        if smart_sampler is not None and not _SMART_FEATURES_AVAILABLE:
             logger.warning("智能功能模块未安装，回退到传统模式")
 
         # 初始化智能组件
@@ -118,18 +123,14 @@ class ReplayPipeline(BasePipeline):
         self.frame_buffer: Optional[FrameBuffer] = None
         self._processor_thread: Optional[threading.Thread] = None
 
+        # 初始化智能采样器（使用工厂模式）
         if self.enable_smart_sampling:
-            config = smart_config or {}
-            self.smart_sampler = MLSmartSampler(
-                enable_smart_sampling=True,
-                motion_method=config.get('motion_method', 'MOG2'),
-                motion_threshold=config.get('motion_threshold', 0.1),
-                backup_interval=config.get('backup_interval', 30.0),
-                min_frame_interval=config.get('min_frame_interval', 1.0),
-            )
+            assert smart_sampler is not None  # 类型保护：enable_smart_sampling 为 True 时 smart_sampler 必定非空
+            self.smart_sampler = create_sampler(smart_sampler, smart_config)
+            logger.info("智能采样器已启用: 类型=%s", smart_sampler)
 
         if self.enable_batch_processing:
-            config = smart_config or {}
+            config = batch_config or {}
             self.frame_buffer = FrameBuffer(
                 max_size=config.get('batch_buffer_size', 5),
                 max_wait_time=config.get('batch_timeout', 5.0),
@@ -605,8 +606,8 @@ class ReplayPipeline(BasePipeline):
             batch_count = len(batch_frames)
             item = last_frame
         else:
-            # 单帧推理
-            vlm_result = self.vlm_client.analyze(image, self.prompt)
+            # 单帧推理：直接传递帧信息字典
+            vlm_result = self.vlm_client.analyze(item, self.prompt)
 
         if vlm_result is None:
             return
@@ -662,12 +663,11 @@ class ReplayPipeline(BasePipeline):
     def _process_batch(self, frames: List[Dict[str, Any]]) -> Optional[VLMResult]:
         """批量处理帧列表。"""
         start_time = time.time()
-
-        images = [frame['image'] for frame in frames]
         significant_count = sum(1 for frame in frames if frame.get('significant'))
 
         try:
-            vlm_result = self.vlm_client.analyze_batch(images, self.prompt)
+            # 执行批量推理：直接传递帧信息字典列表
+            vlm_result = self.vlm_client.analyze_batch(frames, self.prompt)
 
             processing_time = time.time() - start_time
             logger.info(
@@ -728,40 +728,25 @@ class ReplayPipeline(BasePipeline):
 
                 frame_np, ts, idx = item
 
-                # 情况1: 智能采样器 + 预处理器
+                # 统一获取帧数据迭代器
                 if self.smart_sampler:
-                    for sampled_data in self.smart_sampler.sample(iter([(frame_np, ts)])):
-                        if self._stop_event.is_set():
-                            break
-                        # 预处理采样后的帧
-                        if self.preprocessor:
-                            sampled_data = self.preprocessor.process_frame(sampled_data)
-                        self._blocking_put(self._queue, sampled_data)
-
-                # 情况2: 仅预处理器（无智能采样器）
-                elif self.preprocessor:
-                    # 直接对原始帧进行预处理
-                    pil_image = self._numpy_to_pil(frame_np)
-                    frame_data = {
-                        'image': pil_image,
-                        'timestamp': ts,
-                        'frame_index': idx,
-                        'significant': True,
-                        'source': ['traditional'],
-                    }
-                    processed_data = self.preprocessor.process_frame(frame_data)
-                    self._blocking_put(self._queue, processed_data)
-
-                # 情况3: 无处理器（不应该进入此线程）
+                    frame_iter = self.smart_sampler.sample(iter([(frame_np, ts)]))
                 else:
                     pil_image = self._numpy_to_pil(frame_np)
-                    frame_data = {
+                    frame_iter = iter([{
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
                         'source': ['traditional'],
-                    }
+                    }])
+
+                # 统一处理流程：预处理 → 入队
+                for frame_data in frame_iter:
+                    if self._stop_event.is_set():
+                        break
+                    if self.preprocessor:
+                        frame_data = self.preprocessor.process_frame(frame_data)
                     self._blocking_put(self._queue, frame_data)
 
         except Exception as exc:

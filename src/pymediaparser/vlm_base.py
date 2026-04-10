@@ -85,6 +85,8 @@ class VLMConfig:
         use_flash_attn: 是否尝试使用 Flash Attention 2。
         max_pixels: processor 最大像素数（控制显存）。
         min_pixels: processor 最小像素数。
+        timing_prefix: 多帧批处理时的时序前缀文本。
+        timing_format: 时序标签格式，支持 {index} 和 {timestamp} 占位符。
     """
 
     model_path: str = DEFAULT_MODEL_PATH
@@ -95,6 +97,9 @@ class VLMConfig:
     use_flash_attn: bool = True
     max_pixels: int = 512 * 28 * 28
     min_pixels: int = 256 * 28 * 28
+    # 时序消息格式配置
+    timing_prefix: str = "以下是连续的视频帧："
+    timing_format: str = "[Frame #{index}, t={timestamp:.2f}s]"
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +162,20 @@ class VLMClient(ABC):
         """加载模型到显存/内存。应在调用 ``analyze`` 前执行。"""
 
     @abstractmethod
-    def analyze(self, image: Image.Image, prompt: str | None = None) -> VLMResult:
+    def analyze(
+        self,
+        frame: Dict[str, Any],
+        prompt: str | None = None,
+    ) -> VLMResult:
         """对单帧图像进行理解分析。
 
         Args:
-            image: RGB 格式的 PIL 图像。
+            frame: 帧信息字典，包含：
+                - image: RGB 格式的 PIL 图像
+                - timestamp: 帧时间戳（秒）
+                - frame_index: 帧序号
+                - significant: 是否显著帧
+                - source: 触发源
             prompt: 文本提示词；为 ``None`` 时使用配置中的默认 prompt。
 
         Returns:
@@ -176,7 +190,7 @@ class VLMClient(ABC):
 
     def analyze_batch(
         self,
-        images: Sequence[Image.Image],
+        frames: Sequence[Dict[str, Any]],
         prompt: str | None = None,
     ) -> VLMResult:
         """对多帧图像进行批量理解分析（可选实现）。
@@ -185,7 +199,7 @@ class VLMClient(ABC):
         子类可覆盖此方法以提供更高效的批量处理实现。
 
         Args:
-            images: RGB 格式的 PIL 图像序列。
+            frames: 帧信息字典列表，每个字典包含 image、timestamp、frame_index 等。
             prompt: 文本提示词；为 ``None`` 时使用配置中的默认 prompt。
 
         Returns:
@@ -195,15 +209,15 @@ class VLMClient(ABC):
             NotImplementedError: 如果子类未实现此方法且需要显式报错。
         """
         # 默认实现：逐帧推理后合并结果
-        if not images:
-            return VLMResult(text="[空图像列表]", inference_time=0.0)
+        if not frames:
+            return VLMResult(text="[空帧列表]", inference_time=0.0)
 
         results_text: List[str] = []
         total_time = 0.0
 
-        for i, img in enumerate(images):
-            frame_prompt = f"{prompt or self._get_default_prompt()}\n\n这是第{i+1}/{len(images)}帧的内容分析："
-            result = self.analyze(img, frame_prompt)
+        for i, frame in enumerate(frames):
+            frame_prompt = f"{prompt or self._get_default_prompt()}\n\n这是第{i+1}/{len(frames)}帧的内容分析："
+            result = self.analyze(frame, frame_prompt)
             results_text.append(result.text)
             total_time += result.inference_time
 

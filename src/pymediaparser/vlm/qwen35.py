@@ -11,10 +11,12 @@ Qwen3.5 使用混合注意力机制（linear_attention + full_attention），
 
     from pymediaparser.vlm_base import VLMConfig
     from pymediaparser.vlm.qwen35 import Qwen35Client
+    from PIL import Image
 
     config = VLMConfig(model_path="/path/to/Qwen3.5-0.8B", device="cuda:0")
     with Qwen35Client(config) as client:
-        result = client.analyze(pil_image, "请描述画面内容。")
+        frame = {'image': Image.open('test.jpg'), 'frame_index': 0, 'timestamp': 0.0}
+        result = client.analyze(frame, "请描述画面内容。")
         print(result.text)
 """
 

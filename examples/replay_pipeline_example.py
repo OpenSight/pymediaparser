@@ -147,7 +147,7 @@ def example_smart_sampling_replay():
     pipeline = ReplayPipeline(
         stream_config=stream_config,
         vlm_client=vlm_client,
-        enable_smart_sampling=True,
+        smart_sampler='ml',
         enable_batch_processing=False,
         smart_config=smart_config,
     )
@@ -190,9 +190,9 @@ def example_batch_processing_replay():
     pipeline = ReplayPipeline(
         stream_config=stream_config,
         vlm_client=vlm_client,
-        enable_smart_sampling=False,
+        smart_sampler=None,
         enable_batch_processing=True,
-        smart_config=smart_config,
+        batch_config=smart_config,
     )
     
     print(f"配置完成:")
@@ -237,7 +237,7 @@ def example_full_smart_replay():
     pipeline = ReplayPipeline(
         stream_config=stream_config,
         vlm_client=vlm_client,
-        enable_smart_sampling=True,
+        smart_sampler='ml',
         enable_batch_processing=True,
         smart_config=smart_config,
     )

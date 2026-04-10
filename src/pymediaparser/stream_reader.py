@@ -55,20 +55,25 @@ class StreamReader:
         Raises:
             av.AVError: 连接或打开失败时抛出。
         """
-        options = self._build_options()
         fmt = self._detect_format()
+        is_rtmp = self.config.url.lower().startswith("rtmp")
 
         logger.info("正在连接流: %s (format=%s)", self.config.url, fmt or "auto")
 
-        kwargs: dict = {"options": options}
+        # PyAV 17 / libavformat 62: passing a non-empty options dict to av.open()
+        # for RTMP URLs triggers a segfault in the bundled libavformat.  Use
+        # PyAV's native timeout= parameter for RTMP; keep the options dict only
+        # for non-RTMP protocols where it is safe.
+        if is_rtmp:
+            kwargs: dict = {"timeout": self.config.timeout}
+        else:
+            options = self._build_options()
+            timeout_us = int(self.config.timeout * 1_000_000)
+            options.setdefault("stimeout", str(timeout_us))
+            options.setdefault("rw_timeout", str(timeout_us))
+            kwargs = {"options": options}
         if fmt:
             kwargs["format"] = fmt
-
-        # 设置超时（微秒）
-        timeout_us = int(self.config.timeout * 1_000_000)
-        kwargs.setdefault("options", {})
-        kwargs["options"].setdefault("stimeout", str(timeout_us))   # RTSP/RTMP
-        kwargs["options"].setdefault("rw_timeout", str(timeout_us))  # HTTP
 
         self._container = av.open(self.config.url, **kwargs)
         logger.info("流连接成功: %s", self.config.url)

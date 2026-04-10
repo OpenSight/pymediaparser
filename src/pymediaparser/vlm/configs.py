@@ -37,6 +37,8 @@ class APIVLMConfig:
         image_quality: JPEG 编码质量（1-100）。
         max_new_tokens: 单次生成最大 token 数。
         default_prompt: 没有提供 prompt 时使用的默认问题。
+        timing_prefix: 多帧批处理时的时序前缀文本。
+        timing_format: 时序标签格式，支持 {index} 和 {timestamp} 占位符。
     """
 
     base_url: str = "http://localhost:8000/v1"
@@ -48,3 +50,6 @@ class APIVLMConfig:
     image_quality: int = 85
     max_new_tokens: int = 256
     default_prompt: str = "请描述当前画面中的人物活动。"
+    # 时序消息格式配置
+    timing_prefix: str = "以下是连续的视频帧："
+    timing_format: str = "[Frame #{index}, t={timestamp:.2f}s]"

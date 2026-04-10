@@ -77,12 +77,21 @@ pipeline.run()
 
 ### CLI 命令行运行
 
+使用 `scripts/run_parser.py` 统一入口，通过 `--mode replay` 指定文件回放模式：
+
 ```bash
-python -m pymediaparser.replay_pipeline \
+# 文件回放模式
+python scripts/run_parser.py \
+    --mode replay \
     --url "/path/to/video.mp4" \
     --fps 1.0 \
     --device cuda:0 \
     --prompt "请描述画面中的内容。"
+
+# 处理图片文件
+python scripts/run_parser.py \
+    --mode replay \
+    --url "/path/to/image.jpg"
 ```
 
 ---
@@ -384,7 +393,7 @@ pipeline = ReplayPipeline(
 pipeline = ReplayPipeline(
     stream_config=stream_config,
     vlm_client=vlm_client,
-    enable_smart_sampling=True,
+    smart_sampler='ml',                # 启用智能采样（'simple' 或 'ml'）
     smart_config={
         'motion_method': 'MOG2',        # 运动检测方法
         'motion_threshold': 0.1,        # 运动检测阈值
@@ -403,7 +412,7 @@ pipeline = ReplayPipeline(
     stream_config=stream_config,
     vlm_client=vlm_client,
     enable_batch_processing=True,
-    smart_config={
+    batch_config={
         'batch_buffer_size': 5,         # 批次大小
         'batch_timeout': 5.0,           # 批次超时（秒）
     },
@@ -495,7 +504,7 @@ stream_config = StreamConfig(
 pipeline = ReplayPipeline(
     stream_config=stream_config,
     vlm_client=vlm_client,
-    enable_smart_sampling=True,  # 启用智能采样
+    smart_sampler='ml',           # 启用智能采样
 )
 ```
 
@@ -585,42 +594,58 @@ class AnalysisService:
 
 ## CLI 参数参考
 
+使用 `scripts/run_parser.py` 统一入口，通过 `--mode replay` 指定文件回放模式。
+
 ```bash
-python -m pymediaparser.replay_pipeline [OPTIONS]
+python scripts/run_parser.py --mode replay [OPTIONS]
+
+# 运行模式
+--mode replay            文件回放模式
 
 # 文件配置
---url TEXT              文件路径或网络 URL（必填）
---fps FLOAT             目标抽帧频率（默认 1.0）
---queue-size INT        帧缓冲队列大小（默认 3）
---decode-mode TEXT      解码模式：all / keyframe_only（默认 all）
+--url TEXT               文件路径或网络 URL（必填）
+--fps FLOAT              目标抽帧频率（默认 1.0）
+--queue-size INT         帧缓冲队列大小（默认 3）
+--decode-mode TEXT       解码模式：all / keyframe_only（默认 all）
 
 # VLM 配置
---model-path TEXT       VLM 模型路径
---device TEXT           推理设备（默认 cuda:0）
---dtype TEXT            推理精度（默认 float16）
---max-tokens INT        最大生成 token 数（默认 256）
---prompt TEXT           VLM 提示词
+--vlm-backend TEXT       VLM 后端：qwen2 / qwen3 / qwen35 / openai_api / bmp（默认 qwen35）
+--model-path TEXT        VLM 模型路径
+--device TEXT            推理设备（默认 cuda:0）
+--dtype TEXT             推理精度（默认 float16）
+--max-tokens INT         最大生成 token 数（默认 256）
+--prompt TEXT            VLM 提示词
 
-# VLM 后端
---vlm-backend TEXT      VLM 后端：qwen2 / qwen3 / openai_api（默认 qwen3）
---api-base-url TEXT     API 服务地址
---api-key TEXT          API 密钥
---api-model TEXT        API 模型名称
+# API 后端配置
+--api-base-url TEXT      API 服务地址
+--api-key TEXT           API 密钥
+--api-model TEXT         API 模型名称
 
-# 智能功能
---smart-sampling        启用智能采样
---batch-processing      启用批量处理
+# 智能抽帧配置
+--smart-sampler TEXT     智能采样器：simple / ml
+--motion-method TEXT     运动检测方法：MOG2 / KNN（默认 MOG2）
+--motion-threshold FLOAT 运动检测阈值（默认 0.1）
+--backup-interval FLOAT  保底采样间隔秒数（默认 30.0）
+
+# 批量处理配置
+--batch-processing       启用批量处理
+--batch-buffer-size INT  批缓冲区大小（默认 5）
+--batch-timeout FLOAT    批处理超时秒数（默认 5.0）
 
 # 图像预处理
---preprocessing TEXT    预处理策略：resize / roi_crop
---max-size INT          [resize] 图像最大边长
---roi-method TEXT       [roi_crop] ROI 检测方法
---roi-padding FLOAT     [roi_crop] 边界扩展比例
---min-roi-ratio FLOAT   [roi_crop] 最小 ROI 占比
+--preprocessing TEXT     预处理策略：resize / roi_crop
+--max-size INT           [resize] 图像最大边长（默认 1024）
+--roi-method TEXT        [roi_crop] ROI 检测方法（默认 motion）
+
+# 输出配置
+--callback-url TEXT      HTTP 回调地址
+--quiet                  静默模式
 
 # 日志
---log-level TEXT        日志级别（默认 INFO）
+--log-level TEXT         日志级别：DEBUG / INFO / WARNING / ERROR（默认 INFO）
 ```
+
+更多参数详情请参考 `python scripts/run_parser.py --help`。
 
 ---
 

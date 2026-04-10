@@ -2,19 +2,10 @@
 
 生产者线程负责拉流解码并按频率抽帧，消费者线程负责 VLM 推理和结果输出。
 通过有界队列 + 丢弃旧帧策略保证内存可控。
-
-CLI 用法::
-
-    python -m pymediaparser.live_pipeline \\
-        --url "rtmp://host/live/stream" \\
-        --fps 1.0 \\
-        --device cuda:0 \\
-        --prompt "请描述画面中的内容。"
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import queue
 import threading
@@ -32,7 +23,7 @@ from .vlm_base import FrameResult, StreamConfig, VLMClient, VLMConfig, VLMResult
 
 # 智能功能导入（可选）
 try:
-    from .smart_sampler import SmartSampler, MLSmartSampler
+    from .smart_sampler import SmartSampler, BaseSamplerConfig, create_sampler
     from .frame_buffer import FrameBuffer
     _SMART_FEATURES_AVAILABLE = True
 except ImportError:
@@ -80,9 +71,12 @@ class LivePipeline(BasePipeline):
         vlm_client: VLM 推理客户端实例。
         handlers: 结果处理器列表；为空时默认使用 ConsoleResultHandler。
         prompt: VLM 推理提示词；为 None 时使用 VLMConfig 中的默认 prompt。
-        enable_smart_sampling: 是否启用智能采样（需要smart_sampler模块）。
+        smart_sampler: 智能采样器类型（'simple' 或 'ml'），为 None 时不启用智能采样。
+        smart_config: 智能采样器配置对象或配置字典。
         enable_batch_processing: 是否启用批量处理（需要frame_buffer模块）。
-        smart_config: 智能功能配置字典。
+        batch_config: 批量处理配置字典。
+        preprocessing: 图像预处理策略名称。
+        preprocess_config: 图像预处理配置对象。
     """
 
     def __init__(
@@ -91,10 +85,12 @@ class LivePipeline(BasePipeline):
         vlm_client: VLMClient,
         handlers: Sequence[ResultHandler] | None = None,
         prompt: str | None = None,
-        # 智能功能参数
-        enable_smart_sampling: bool = False,
+        # 智能采样参数（新设计）
+        smart_sampler: Optional[str] = None,
+        smart_config: Union[BaseSamplerConfig, Dict[str, Any], None] = None,
+        # 批处理参数
         enable_batch_processing: bool = False,
-        smart_config: Optional[Dict[str, Any]] = None,
+        batch_config: Optional[Dict[str, Any]] = None,
         # 图像预处理参数
         preprocessing: Optional[str] = None,
         preprocess_config: Union[ResizeConfig, ROICropConfig, None] = None,
@@ -108,10 +104,10 @@ class LivePipeline(BasePipeline):
         self.prompt = prompt
 
         # 智能功能开关
-        self.enable_smart_sampling = enable_smart_sampling and _SMART_FEATURES_AVAILABLE
+        self.enable_smart_sampling = smart_sampler is not None and _SMART_FEATURES_AVAILABLE
         self.enable_batch_processing = enable_batch_processing and _SMART_FEATURES_AVAILABLE
 
-        if (enable_smart_sampling or enable_batch_processing) and not _SMART_FEATURES_AVAILABLE:
+        if smart_sampler is not None and not _SMART_FEATURES_AVAILABLE:
             logger.warning("智能功能模块未安装，回退到传统模式")
 
         # 初始化智能组件
@@ -119,18 +115,15 @@ class LivePipeline(BasePipeline):
         self.frame_buffer: Optional[FrameBuffer] = None
         self._processor_thread: Optional[threading.Thread] = None
 
+        # 初始化智能采样器（使用工厂模式）
         if self.enable_smart_sampling:
-            config = smart_config or {}
-            self.smart_sampler = MLSmartSampler(
-                enable_smart_sampling=True,
-                motion_method=config.get('motion_method', 'MOG2'),
-                motion_threshold=config.get('motion_threshold', 0.1),
-                backup_interval=config.get('backup_interval', 30.0),
-                min_frame_interval=config.get('min_frame_interval', 1.0),
-            )
+            # 类型断言：enable_smart_sampling 为 True 时 smart_sampler 必不为 None
+            assert smart_sampler is not None
+            self.smart_sampler = create_sampler(smart_sampler, smart_config)
+            logger.info("智能采样器已启用: 类型=%s", smart_sampler)
 
         if self.enable_batch_processing:
-            config = smart_config or {}
+            config = batch_config or {}
             self.frame_buffer = FrameBuffer(
                 max_size=config.get('batch_buffer_size', 5),
                 max_wait_time=config.get('batch_timeout', 5.0),
@@ -555,8 +548,8 @@ class LivePipeline(BasePipeline):
             idx = last_frame['frame_index']
             batch_count = len(batch_frames)
         else:
-            # 单帧推理
-            vlm_result = self.vlm_client.analyze(image, self.prompt)
+            # 单帧推理：直接传递帧信息字典
+            vlm_result = self.vlm_client.analyze(item, self.prompt)
 
         # 错误处理
         if vlm_result is None:
@@ -588,13 +581,11 @@ class LivePipeline(BasePipeline):
     def _process_batch(self, frames: List[Dict[str, Any]]) -> Optional[VLMResult]:
         """批量处理帧列表。"""
         start_time = time.time()
-
-        images = [frame['image'] for frame in frames]
         significant_count = sum(1 for frame in frames if frame.get('significant'))
 
-        # 执行批量推理
+        # 执行批量推理：直接传递帧信息字典列表
         try:
-            vlm_result = self.vlm_client.analyze_batch(images, self.prompt)
+            vlm_result = self.vlm_client.analyze_batch(frames, self.prompt)
 
             processing_time = time.time() - start_time
             logger.info(
@@ -663,41 +654,25 @@ class LivePipeline(BasePipeline):
 
                 frame_np, ts, idx = item
 
-                # 情况1: 智能采样器 + 预处理器
+                # 统一获取帧数据迭代器
                 if self.smart_sampler:
-                    for sampled_data in self.smart_sampler.sample(iter([(frame_np, ts)])):
-                        if self._stop_event.is_set():
-                            break
-                        # 预处理采样后的帧
-                        if self.preprocessor:
-                            sampled_data = self.preprocessor.process_frame(sampled_data)
-                        self._enqueue_frame(sampled_data)
-
-                # 情况2: 仅预处理器（无智能采样器）
-                elif self.preprocessor:
-                    # 直接对原始帧进行预处理
-                    pil_image = self._numpy_to_pil(frame_np)
-                    frame_data = {
-                        'image': pil_image,
-                        'timestamp': ts,
-                        'frame_index': idx,
-                        'significant': True,
-                        'source': ['traditional'],
-                    }
-                    processed_data = self.preprocessor.process_frame(frame_data)
-                    self._enqueue_frame(processed_data)
-
-                # 情况3: 无处理器（不应该进入此线程）
+                    frame_iter = self.smart_sampler.sample(iter([(frame_np, ts)]))
                 else:
-                    # 直接转发
                     pil_image = self._numpy_to_pil(frame_np)
-                    frame_data = {
+                    frame_iter = iter([{
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
                         'source': ['traditional'],
-                    }
+                    }])
+
+                # 统一处理流程：预处理 → 入队
+                for frame_data in frame_iter:
+                    if self._stop_event.is_set():
+                        break
+                    if self.preprocessor:
+                        frame_data = self.preprocessor.process_frame(frame_data)
                     self._enqueue_frame(frame_data)
 
         except Exception as exc:
@@ -722,174 +697,3 @@ class LivePipeline(BasePipeline):
         rgb_frame = cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB)
         return Image.fromarray(rgb_frame)
 
-
-# ======================================================================
-# CLI 入口
-# ======================================================================
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="实时流 VLM 分析 Pipeline —— 从 RTMP/HTTP-FLV/HTTP-TS 拉流，"
-                    "按频率抽帧并送入 VLM 大模型进行理解。",
-    )
-    # 流配置
-    parser.add_argument("--url", required=True, help="流地址 (rtmp:// / http://*.flv / http://*.ts)")
-    parser.add_argument("--format", default=None, help="强制容器格式: flv / mpegts (默认自动检测)")
-    parser.add_argument("--fps", type=float, default=1.0, help="目标抽帧频率 (默认 1.0)")
-    parser.add_argument("--queue-size", type=int, default=3, help="帧缓冲队列大小 (默认 3)")
-    parser.add_argument("--reconnect", type=float, default=3.0, help="断线重连间隔秒数 (默认 3.0)")
-    parser.add_argument(
-        "--decode-mode", default="all",
-        choices=["all", "keyframe_only"],
-        help="解码模式: all=全帧解码 / keyframe_only=仅解码关键帧 (默认 all)",
-    )
-
-    # VLM 配置
-    parser.add_argument("--model-path", default=None, help="VLM 模型路径 (默认项目内置)")
-    parser.add_argument("--device", default="cuda:0", help="推理设备 (默认 cuda:0)")
-    parser.add_argument("--dtype", default="float16", help="推理精度 (默认 float16)")
-    parser.add_argument("--max-tokens", type=int, default=256, help="最大生成 token 数 (默认 256)")
-    parser.add_argument("--prompt", default=None, help="VLM 提示词 (默认 '请描述当前画面中的人物活动。')")
-
-    # VLM 后端选择
-    parser.add_argument("--vlm-backend", default="qwen3",
-                        help="VLM 后端名称: qwen2 / qwen3 / openai_api (默认 qwen3)")
-    parser.add_argument("--api-base-url", default=None,
-                        help="API 服务地址 (用于 openai_api 后端)")
-    parser.add_argument("--api-key", default=None,
-                        help="API 密钥 (用于 openai_api 后端)")
-    parser.add_argument("--api-model", default=None,
-                        help="API 模型名称 (用于 openai_api 后端)")
-
-    # 智能功能
-    parser.add_argument("--smart-sampling", action="store_true", help="启用智能采样")
-    parser.add_argument("--batch-processing", action="store_true", help="启用批量处理")
-
-    # 图像预处理
-    parser.add_argument(
-        "--preprocessing",
-        choices=["resize", "roi_crop"],
-        default=None,
-        help="启用图像预处理并指定策略: resize=缩放到指定尺寸, roi_crop=对非周期触发帧进行ROI裁剪 (默认: 不启用)",
-    )
-    parser.add_argument(
-        "--max-size",
-        type=int,
-        default=1024,
-        help="[resize策略] 图像最大边长（像素），超过时等比缩放 (默认: 1024)",
-    )
-    parser.add_argument(
-        "--roi-method",
-        choices=["motion", "saliency"],
-        default="motion",
-        help="[roi_crop策略] ROI检测方法: motion=帧差法, saliency=显著性检测 (默认: motion)",
-    )
-    parser.add_argument(
-        "--roi-padding",
-        type=float,
-        default=0.2,
-        help="[roi_crop策略] 边界扩展比例 (默认: 0.2)",
-    )
-    parser.add_argument(
-        "--min-roi-ratio",
-        type=float,
-        default=0.2,
-        help="[roi_crop策略] 最小占比阈值，ROI区域过小时扩展到该比例 (默认: 0.2)",
-    )
-
-    # 日志
-    parser.add_argument("--log-level", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="日志级别 (默认 INFO)")
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    """CLI 主函数。"""
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    # 配置日志
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # 构建配置
-    stream_cfg = StreamConfig(
-        url=args.url,
-        format=args.format,
-        target_fps=args.fps,
-        reconnect_interval=args.reconnect,
-        max_queue_size=args.queue_size,
-        decode_mode=args.decode_mode,
-    )
-
-    vlm_kwargs: dict = {
-        "device": args.device,
-        "dtype": args.dtype,
-        "max_new_tokens": args.max_tokens,
-    }
-    if args.model_path:
-        vlm_kwargs["model_path"] = args.model_path
-    if args.prompt:
-        vlm_kwargs["default_prompt"] = args.prompt
-
-    # 根据后端类型创建客户端
-    from .vlm.factory import create_vlm_client
-
-    backend = args.vlm_backend
-    if backend == "openai_api":
-        from .vlm.configs import APIVLMConfig
-        api_kwargs: dict = {}
-        if args.api_base_url:
-            api_kwargs["base_url"] = args.api_base_url
-        if args.api_key:
-            api_kwargs["api_key"] = args.api_key
-        if args.api_model:
-            api_kwargs["model_name"] = args.api_model
-        if args.prompt:
-            api_kwargs["default_prompt"] = args.prompt
-        api_kwargs["max_new_tokens"] = args.max_tokens
-        vlm_client = create_vlm_client(backend, APIVLMConfig(**api_kwargs))
-    else:
-        vlm_cfg = VLMConfig(**vlm_kwargs)
-        vlm_client = create_vlm_client(backend, vlm_cfg)
-
-    # 构建预处理配置
-    preprocess_config = None
-    if args.preprocessing is not None:
-        from .image_processor import ResizeConfig, ROICropConfig
-
-        if args.preprocessing == 'resize':
-            preprocess_config = ResizeConfig(max_size=args.max_size)
-        elif args.preprocessing == 'roi_crop':
-            preprocess_config = ROICropConfig(
-                method=args.roi_method,
-                padding_ratio=args.roi_padding,
-                min_roi_ratio=args.min_roi_ratio,
-            )
-
-    # 构建并运行 Pipeline
-    pipeline = LivePipeline(
-        stream_config=stream_cfg,
-        vlm_client=vlm_client,
-        prompt=args.prompt,
-        enable_smart_sampling=args.smart_sampling,
-        enable_batch_processing=args.batch_processing,
-        preprocessing=args.preprocessing,
-        preprocess_config=preprocess_config,
-    )
-
-    logger.info(
-        "配置: url=%s  fps=%.1f  backend=%s  device=%s  dtype=%s  max_tokens=%d",
-        stream_cfg.url, stream_cfg.target_fps, backend,
-        args.device, args.dtype, args.max_tokens,
-    )
-
-    pipeline.run()
-
-
-if __name__ == "__main__":
-    main()

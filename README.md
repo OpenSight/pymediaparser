@@ -439,8 +439,8 @@ pipeline = LivePipeline(
     stream_cfg,
     vlm_client,
     prompt="请描述画面中的内容。",
-    # 启用智能采样
-    enable_smart_sampling=True,
+    # 启用智能采样（'simple' 或 'ml'）
+    smart_sampler='ml',
     smart_config={
         'motion_threshold': 0.3,      # 运动检测阈值（0-1）
         'backup_interval': 30.0,      # 保底采样间隔（秒）

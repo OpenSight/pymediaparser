@@ -8,13 +8,15 @@
 
     from pymediaparser.vlm.openai_api import OpenAIAPIClient
     from pymediaparser.vlm.configs import APIVLMConfig
+    from PIL import Image
 
     config = APIVLMConfig(
         base_url="http://localhost:8000/v1",
         model_name="Qwen2-VL-2B-Instruct",
     )
     with OpenAIAPIClient(config) as client:
-        result = client.analyze(pil_image, "请描述画面内容。")
+        frame = {'image': Image.open('test.jpg'), 'frame_index': 0, 'timestamp': 0.0}
+        result = client.analyze(frame, "请描述画面内容。")
         print(result.text)
 """
 
@@ -67,7 +69,11 @@ class OpenAIAPIClient(VLMClient):
             self.config.base_url, self.config.model_name,
         )
 
-    def analyze(self, image: Image.Image, prompt: str | None = None) -> VLMResult:
+    def analyze(
+        self,
+        frame: Dict[str, Any],
+        prompt: str | None = None,
+    ) -> VLMResult:
         """对单帧图像调用 API 推理。"""
         if self._session is None:
             raise RuntimeError("客户端尚未初始化，请先调用 load()")
@@ -75,22 +81,9 @@ class OpenAIAPIClient(VLMClient):
         prompt = prompt or self.config.default_prompt
         t0 = time.perf_counter()
 
-        # 构建请求体
-        image_b64 = self._encode_image(image)
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}",
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
+        # 构建消息（单帧也有时序信息）
+        content = self._build_content_with_timing([frame], prompt)
+        messages = [{"role": "user", "content": content}]
 
         payload = {
             "model": self.config.model_name,
@@ -114,14 +107,16 @@ class OpenAIAPIClient(VLMClient):
         return result
 
     def analyze_batch(
-        self, images: Sequence[Image.Image], prompt: str | None = None,
+        self,
+        frames: Sequence[Dict[str, Any]],
+        prompt: str | None = None,
     ) -> VLMResult:
         """对多张图像调用 API 批量推理。
 
         将多张图像放入同一条消息的 content 数组中。
         """
-        if not images:
-            raise ValueError("图像列表不能为空")
+        if not frames:
+            raise ValueError("帧信息列表不能为空")
 
         if self._session is None:
             raise RuntimeError("客户端尚未初始化，请先调用 load()")
@@ -129,18 +124,8 @@ class OpenAIAPIClient(VLMClient):
         prompt = prompt or self.config.default_prompt
         start_time = time.perf_counter()
 
-        # 构建多图像消息
-        content: List[Dict[str, Any]] = []
-        for img in images:
-            image_b64 = self._encode_image(img)
-            content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{image_b64}",
-                },
-            })
-        content.append({"type": "text", "text": prompt})
-
+        # 使用辅助方法构建消息
+        content = self._build_content_with_timing(frames, prompt)
         messages = [{"role": "user", "content": content}]
 
         payload = {
@@ -155,8 +140,8 @@ class OpenAIAPIClient(VLMClient):
         result.inference_time = time.perf_counter() - start_time
 
         logger.debug(
-            "API 批量推理完成: %d 张图像, %.2fs",
-            len(images), result.inference_time,
+            "API 批量推理完成: %d 帧, %.2fs",
+            len(frames), result.inference_time,
         )
 
         return result
@@ -172,6 +157,48 @@ class OpenAIAPIClient(VLMClient):
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _build_content_with_timing(
+        self,
+        frames: Sequence[Dict[str, Any]],
+        prompt: str,
+    ) -> List[Dict[str, Any]]:
+        """构建带时序标签的消息内容（OpenAI API 格式）。"""
+        content: List[Dict[str, Any]] = []
+
+        # 多帧时添加前缀
+        if len(frames) > 1:
+            content.append({
+                "type": "text",
+                "text": self.config.timing_prefix
+            })
+
+        for frame in frames:
+            img = frame.get('image')
+            # 类型安全转换，避免 None 或非数值类型导致 format 异常
+            try:
+                index = int(frame.get('frame_index', 0) or 0)
+            except (TypeError, ValueError):
+                index = 0
+            try:
+                timestamp = float(frame.get('timestamp', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                timestamp = 0.0
+
+            timing_text = self.config.timing_format.format(
+                index=index,
+                timestamp=timestamp
+            )
+            # OpenAI API 使用 image_url 格式
+            image_b64 = self._encode_image(img)
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
+            })
+            content.append({"type": "text", "text": timing_text})
+
+        content.append({"type": "text", "text": prompt})
+        return content
 
     def _encode_image(self, image: Image.Image) -> str:
         """将 PIL 图像编码为 base64 字符串。

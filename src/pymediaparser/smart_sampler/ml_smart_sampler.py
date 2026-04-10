@@ -37,6 +37,7 @@ class MLSmartSampler(SmartSampler):
         motion_threshold: float = 0.1,
         backup_interval: float = 30.0,
         min_frame_interval: float = 1.0,
+        scene_switch_threshold: float = 0.5,
     ) -> None:
         super().__init__(
             enable_smart_sampling=enable_smart_sampling,
@@ -54,6 +55,7 @@ class MLSmartSampler(SmartSampler):
         self.fast_triggers = FastTriggers(
             motion_method=motion_method,
             motion_threshold=motion_threshold,
+            scene_switch_threshold=scene_switch_threshold,
             periodic_interval=backup_interval,
         )
 

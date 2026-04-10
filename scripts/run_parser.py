@@ -87,12 +87,12 @@ def parse_args() -> argparse.Namespace:
   %(prog)s --url rtmp://host/live/stream --vlm-backend bmp --model-path /tmp/debug_frames
   
 智能采样模式:
-  %(prog)s --url rtmp://host/live/stream --smart-sampling
-  %(prog)s --url rtmp://host/live/stream --smart-sampling --motion-threshold 0.2
+  %(prog)s --url rtmp://host/live/stream --smart-sampler simple
+  %(prog)s --url rtmp://host/live/stream --smart-sampler ml --motion-threshold 0.2
   
 批量处理模式（可独立使用或配合智能采样）:
   %(prog)s --url rtmp://host/live/stream --batch-processing
-  %(prog)s --url rtmp://host/live/stream --smart-sampling --batch-processing
+  %(prog)s --url rtmp://host/live/stream --smart-sampler ml --batch-processing
 """,
     )
 
@@ -185,25 +185,38 @@ def parse_args() -> argparse.Namespace:
     # ── 智能抽帧配置 ─────────────────────────────────────────
     smart_group = parser.add_argument_group("智能抽帧配置")
     smart_group.add_argument(
-        "--smart-sampling", action="store_true",
-        help="启用智能抽帧模式（基于内容变化检测）",
+        "--smart-sampler",
+        choices=["simple", "ml"],
+        default=None,
+        help="启用智能抽帧并指定采样器类型: simple=基础采样器, ml=三层漏斗采样器 (默认: 不启用)",
     )
+    # 通用参数
     smart_group.add_argument(
         "--motion-method", default="MOG2",
         choices=["MOG2", "KNN"],
-        help="运动检测方法（默认: MOG2）",
+        help="[simple/ml] 运动检测方法 (默认: MOG2)",
     )
     smart_group.add_argument(
         "--motion-threshold", type=float, default=0.1,
-        help="运动检测阈值，运动像素占比（默认: 0.1）",
+        help="[simple/ml] 运动检测阈值 (默认: 0.1)",
     )
     smart_group.add_argument(
         "--backup-interval", type=float, default=30.0,
-        help="保底采样间隔（秒），画面无变化时的最大间隔（默认: 30）",
+        help="[simple/ml] 保底/周期采样间隔秒数 (默认: 30.0)",
     )
     smart_group.add_argument(
         "--min-frame-interval", type=float, default=1.0,
-        help="最小帧间隔（秒），避免连续送帧导致VLM过载（默认: 1）",
+        help="[simple/ml] 最小帧间隔秒数 (默认: 1.0)",
+    )
+    # Simple 专属参数
+    smart_group.add_argument(
+        "--ssim-threshold", type=float, default=0.80,
+        help="[simple] SSIM相似度阈值 (默认: 0.80)",
+    )
+    # ML 专属参数
+    smart_group.add_argument(
+        "--scene-switch-threshold", type=float, default=0.5,
+        help="[ml] 场景切换阈值，值越高越敏感 (默认: 0.5)",
     )
     
     # ── 批量处理配置 ─────────────────────────────────────────
@@ -370,13 +383,35 @@ def main() -> None:
     logger.info("=" * 50)
 
     # ── 构建 Pipeline ────────────────────────────────────────
+    # 构建智能采样器配置
     smart_config = None
-    if args.smart_sampling or args.batch_processing:
-        smart_config = {
-            'motion_method': args.motion_method,
-            'motion_threshold': args.motion_threshold,
+    smart_sampler = None
+    if args.smart_sampler is not None:
+        from pymediaparser.smart_sampler import SimpleSamplerConfig, MLSamplerConfig
+        smart_sampler = args.smart_sampler
+
+        common_config = {
             'backup_interval': args.backup_interval,
             'min_frame_interval': args.min_frame_interval,
+            'motion_method': args.motion_method,
+            'motion_threshold': args.motion_threshold,
+        }
+
+        if args.smart_sampler == 'simple':
+            smart_config = SimpleSamplerConfig(
+                **common_config,
+                ssim_threshold=args.ssim_threshold,
+            )
+        elif args.smart_sampler == 'ml':
+            smart_config = MLSamplerConfig(
+                **common_config,
+                scene_switch_threshold=args.scene_switch_threshold,
+            )
+
+    # 构建批量处理配置
+    batch_config = None
+    if args.batch_processing:
+        batch_config = {
             'batch_buffer_size': args.batch_buffer_size,
             'batch_timeout': args.batch_timeout,
         }
@@ -403,9 +438,10 @@ def main() -> None:
             vlm_client=vlm_client,
             handlers=handlers,
             prompt=args.prompt,
-            enable_smart_sampling=args.smart_sampling,
-            enable_batch_processing=args.batch_processing,
+            smart_sampler=smart_sampler,
             smart_config=smart_config,
+            enable_batch_processing=args.batch_processing,
+            batch_config=batch_config,
             preprocessing=args.preprocessing,
             preprocess_config=preprocess_config,
         )
@@ -416,9 +452,10 @@ def main() -> None:
             vlm_client=vlm_client,
             handlers=handlers,
             prompt=args.prompt,
-            enable_smart_sampling=args.smart_sampling,
-            enable_batch_processing=args.batch_processing,
+            smart_sampler=smart_sampler,
             smart_config=smart_config,
+            enable_batch_processing=args.batch_processing,
+            batch_config=batch_config,
             preprocessing=args.preprocessing,
             preprocess_config=preprocess_config,
         )
@@ -426,15 +463,15 @@ def main() -> None:
     # 显示运行模式信息
     if is_replay:
         mode_parts = ["文件回放"]
-        if args.smart_sampling:
-            mode_parts.append("智能采样")
+        if args.smart_sampler:
+            mode_parts.append(f"智能采样({args.smart_sampler})")
         if args.batch_processing:
             mode_parts.append("批量处理")
         logger.info("运行模式:   %s", "+".join(mode_parts))
-    elif args.smart_sampling or args.batch_processing:
+    elif args.smart_sampler or args.batch_processing:
         mode_info = []
-        if args.smart_sampling:
-            mode_info.append("智能采样")
+        if args.smart_sampler:
+            mode_info.append(f"智能采样({args.smart_sampler})")
         if args.batch_processing:
             mode_info.append("批量处理")
         logger.info("运行模式:   %s", "+".join(mode_info))
@@ -442,11 +479,16 @@ def main() -> None:
         logger.info("运行模式:   传统固定频率抽帧")
 
     # 显示智能功能详情
-    if args.smart_sampling:
+    if args.smart_sampler:
+        logger.info("采样器类型: %s", args.smart_sampler)
         logger.info("运动检测:   %s", args.motion_method)
         logger.info("运动阈值:   %.2f", args.motion_threshold)
         logger.info("保底间隔:   %.1f秒", args.backup_interval)
         logger.info("最小帧间隔: %.1f秒", args.min_frame_interval)
+        if args.smart_sampler == 'simple':
+            logger.info("SSIM阈值:   %.2f", args.ssim_threshold)
+        elif args.smart_sampler == 'ml':
+            logger.info("场景切换阈值: %.2f", args.scene_switch_threshold)
     if args.batch_processing:
         logger.info("批缓冲区:   %d", args.batch_buffer_size)
         logger.info("帧时间戳跨度上限: %.1f秒", args.batch_timeout)
