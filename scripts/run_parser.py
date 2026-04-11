@@ -197,10 +197,6 @@ def parse_args() -> argparse.Namespace:
         help="[simple/ml] 运动检测方法 (默认: MOG2)",
     )
     smart_group.add_argument(
-        "--motion-threshold", type=float, default=0.1,
-        help="[simple/ml] 运动检测阈值 (默认: 0.1)",
-    )
-    smart_group.add_argument(
         "--backup-interval", type=float, default=30.0,
         help="[simple/ml] 保底/周期采样间隔秒数 (默认: 30.0)",
     )
@@ -210,8 +206,16 @@ def parse_args() -> argparse.Namespace:
     )
     # Simple 专属参数
     smart_group.add_argument(
-        "--ssim-threshold", type=float, default=0.80,
-        help="[simple] SSIM相似度阈值 (默认: 0.80)",
+        "--sensitivity", type=float, default=0.5,
+        help="[simple] 活动检测灵敏度 0.0-1.0，值越低越敏感 (默认: 0.5)",
+    )
+    smart_group.add_argument(
+        "--activity-duration", type=float, default=3.0,
+        help="[simple] 活动期持续时间（秒）(默认: 3.0)",
+    )
+    smart_group.add_argument(
+        "--quiet-frames-threshold", type=int, default=10,
+        help="[simple] 静默帧阈值，连续无活动帧数 (默认: 10)",
     )
     # ML 专属参数
     smart_group.add_argument(
@@ -394,13 +398,14 @@ def main() -> None:
             'backup_interval': args.backup_interval,
             'min_frame_interval': args.min_frame_interval,
             'motion_method': args.motion_method,
-            'motion_threshold': args.motion_threshold,
         }
 
         if args.smart_sampler == 'simple':
             smart_config = SimpleSamplerConfig(
                 **common_config,
-                ssim_threshold=args.ssim_threshold,
+                sensitivity=args.sensitivity,
+                activity_duration=args.activity_duration,
+                quiet_frames_threshold=args.quiet_frames_threshold,
             )
         elif args.smart_sampler == 'ml':
             smart_config = MLSamplerConfig(
@@ -482,11 +487,12 @@ def main() -> None:
     if args.smart_sampler:
         logger.info("采样器类型: %s", args.smart_sampler)
         logger.info("运动检测:   %s", args.motion_method)
-        logger.info("运动阈值:   %.2f", args.motion_threshold)
         logger.info("保底间隔:   %.1f秒", args.backup_interval)
         logger.info("最小帧间隔: %.1f秒", args.min_frame_interval)
         if args.smart_sampler == 'simple':
-            logger.info("SSIM阈值:   %.2f", args.ssim_threshold)
+            logger.info("灵敏度:     %.2f", args.sensitivity)
+            logger.info("活动持续时间: %.1f秒", args.activity_duration)
+            logger.info("静默阈值:   %d帧", args.quiet_frames_threshold)
         elif args.smart_sampler == 'ml':
             logger.info("场景切换阈值: %.2f", args.scene_switch_threshold)
     if args.batch_processing:
