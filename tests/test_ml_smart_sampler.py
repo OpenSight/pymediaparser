@@ -3,6 +3,8 @@
 from __future__ import annotations
 import numpy as np
 import pytest
+import cv2
+from PIL import Image
 
 from pymediaparser.smart_sampler.hard_filter import HardFilter
 from pymediaparser.smart_sampler.fast_triggers import FastTriggers
@@ -50,6 +52,29 @@ def _make_gradient_frame(h: int = 480, w: int = 640, offset: int = 0) -> np.ndar
     row = np.linspace(offset, 255 + offset, w, dtype=np.float64) % 256
     frame = np.tile(row.astype(np.uint8), (h, 1))
     return np.stack([frame, frame, frame], axis=-1)
+
+
+def _numpy_to_pil(frame_np: np.ndarray) -> Image.Image:
+    """BGR numpy → RGB PIL。"""
+    rgb_frame = cv2.cvtColor(frame_np, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb_frame)
+
+
+def _make_frames_pil(frame_generator, time_step=1.0):
+    """将 numpy 帧生成器转换为 PIL 帧列表（带时间戳和帧序号）。
+    
+    Args:
+        frame_generator: 生成 numpy 帧的列表或迭代器
+        time_step: 时间步长（秒）
+    
+    Returns:
+        [(PIL Image, timestamp, frame_index), ...]
+    """
+    frames_data = []
+    for i, frame_np in enumerate(frame_generator):
+        pil_image = _numpy_to_pil(frame_np)
+        frames_data.append((pil_image, float(i) * time_step, i))
+    return frames_data
 
 
 # ======================================================================
@@ -290,10 +315,14 @@ class TestMLSmartSampler:
     def test_frame_count_increments(self):
         """frame_count 应对所有输入帧递增（包括被拒绝的帧）。"""
         sampler = MLSmartSampler(min_frame_interval=0.0)
-        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(5)]
+        frames_data = []
+        for i in range(5):
+            frame_np = _make_natural_frame(seed=i)
+            pil_image = _numpy_to_pil(frame_np)
+            frames_data.append((pil_image, float(i), i))
 
         # 消费所有输出
-        list(sampler.sample(iter(frames)))
+        list(sampler.sample(iter(frames_data)))
         assert sampler.frame_count == 5
 
     def test_sample_returns_correct_keys(self):
@@ -304,20 +333,26 @@ class TestMLSmartSampler:
         )
         required_keys = {
             'image', 'timestamp', 'frame_index', 'significant',
-            'source', 'original_frame',
+            'source',
         }
 
         # 生成差异较大的自然帧以确保有输出
-        frames = []
+        frames_data = []
         for i in range(20):
-            frames.append((_make_natural_frame(seed=i * 100), float(i) * 2.0))
+            frame_np = _make_natural_frame(seed=i * 100)
+            pil_image = _numpy_to_pil(frame_np)
+            frames_data.append((pil_image, float(i) * 2.0, i))
 
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
         assert len(results) > 0, "应至少有一帧输出（周期触发）"
 
         for result in results:
             missing = required_keys - set(result.keys())
             assert not missing, f"返回字典缺少键: {missing}"
+        
+        # 验证不应包含 original_frame
+        for result in results:
+            assert 'original_frame' not in result, "返回字典不应包含 original_frame"
 
     def test_change_metrics_format(self):
         """change_metrics 应包含 ssim_score, combined_score, motion_score。"""
@@ -325,8 +360,11 @@ class TestMLSmartSampler:
             min_frame_interval=0.0,
             backup_interval=1.0,
         )
-        frames = [(_make_natural_frame(seed=i * 100), float(i) * 2.0) for i in range(20)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil(
+            [_make_natural_frame(seed=i * 100) for i in range(20)],
+            time_step=2.0
+        )
+        results = list(sampler.sample(iter(frames_data)))
 
         for result in results:
             if 'change_metrics' in result:
@@ -341,8 +379,11 @@ class TestMLSmartSampler:
             min_frame_interval=0.0,
             backup_interval=2.0,
         )
-        frames = [(_make_natural_frame(seed=i * 100), float(i) * 3.0) for i in range(15)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil(
+            [_make_natural_frame(seed=i * 100) for i in range(15)],
+            time_step=3.0
+        )
+        results = list(sampler.sample(iter(frames_data)))
 
         for result in results:
             assert isinstance(result['source'], list), \
@@ -354,8 +395,8 @@ class TestMLSmartSampler:
             enable_smart_sampling=False,
             backup_interval=2.0,
         )
-        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(10)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i) for i in range(10)])
+        results = list(sampler.sample(iter(frames_data)))
 
         # 应有输出（基于时间间隔）
         assert len(results) > 0
@@ -366,8 +407,11 @@ class TestMLSmartSampler:
     def test_reset_clears_state(self):
         """reset() 应重置所有状态。"""
         sampler = MLSmartSampler()
-        frames = [(_make_natural_frame(seed=i), float(i) * 2.0) for i in range(5)]
-        list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil(
+            [_make_natural_frame(seed=i) for i in range(5)],
+            time_step=2.0
+        )
+        list(sampler.sample(iter(frames_data)))
         assert sampler.frame_count > 0
 
         sampler.reset()
@@ -397,8 +441,8 @@ class TestMLSmartSampler:
             min_frame_interval=0.0,
             backup_interval=1.0,
         )
-        frames = [(_make_natural_frame(seed=i * 100), float(i) * 2.0) for i in range(20)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i * 100) for i in range(20)], time_step=2.0)
+        results = list(sampler.sample(iter(frames_data)))
 
         if results:
             # frame_index 应单调递增
@@ -413,8 +457,8 @@ class TestMLSmartSampler:
             min_frame_interval=0.0,
             backup_interval=1.0,
         )
-        frames = [(_make_natural_frame(seed=i * 100), float(i) * 2.0) for i in range(20)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i * 100) for i in range(20)], time_step=2.0)
+        results = list(sampler.sample(iter(frames_data)))
 
         for result in results:
             # 所有帧都应有 original_frame
@@ -425,8 +469,9 @@ class TestMLSmartSampler:
         """None 和空帧应被跳过。"""
         sampler = MLSmartSampler()
         empty = np.array([], dtype=np.uint8)
-        frames = [(None, 0.0), (empty, 1.0)]
-        results = list(sampler.sample(iter(frames)))
+        # 直接传递 None 和空帧，sampler 应该跳过它们
+        frames_data = [(None, 0.0, 0), (empty, 1.0, 1)]
+        results = list(sampler.sample(iter(frames_data)))
         assert len(results) == 0
         # frame_count 不应递增（None/空帧被跳过）
         assert sampler.frame_count == 0
@@ -438,8 +483,8 @@ class TestMLSmartSampler:
     def test_first_frame_is_output(self):
         """首帧应该被输出（周期触发模式）。"""
         sampler = MLSmartSampler()
-        frames = [(_make_natural_frame(seed=0), 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = [(_numpy_to_pil(_make_natural_frame(seed=0)), 0.0, 0)]
+        results = list(sampler.sample(iter(frames_data)))
 
         assert len(results) == 1, "首帧应该被输出"
         assert results[0]['frame_index'] == 0, "首帧的 frame_index 应为 0"
@@ -447,8 +492,8 @@ class TestMLSmartSampler:
     def test_first_frame_source_is_time(self):
         """首帧的 source 应为 ['periodic']（周期触发语义）。"""
         sampler = MLSmartSampler()
-        frames = [(_make_natural_frame(seed=0), 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = [(_numpy_to_pil(_make_natural_frame(seed=0)), 0.0, 0)]
+        results = list(sampler.sample(iter(frames_data)))
 
         assert results[0]['source'] == ['periodic'], \
             f"首帧 source 应为 ['periodic']，实际: {results[0]['source']}"
@@ -456,8 +501,8 @@ class TestMLSmartSampler:
     def test_first_frame_not_significant(self):
         """首帧的 significant 应为 False（周期触发非显著帧）。"""
         sampler = MLSmartSampler()
-        frames = [(_make_natural_frame(seed=0), 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = [(_numpy_to_pil(_make_natural_frame(seed=0)), 0.0, 0)]
+        results = list(sampler.sample(iter(frames_data)))
 
         assert results[0]['significant'] is False, \
             "首帧 significant 应为 False"
@@ -468,7 +513,7 @@ class TestMLSmartSampler:
         frame = _make_natural_frame(seed=0)
         h, w = frame.shape[:2]
         frames = [(frame, 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
 
         result = results[0]
         assert 'original_frame' in result
@@ -478,8 +523,8 @@ class TestMLSmartSampler:
     def test_first_frame_change_metrics(self):
         """首帧 change_metrics 应为初始值。"""
         sampler = MLSmartSampler()
-        frames = [(_make_natural_frame(seed=0), 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = [(_numpy_to_pil(_make_natural_frame(seed=0)), 0.0, 0)]
+        results = list(sampler.sample(iter(frames_data)))
 
         metrics = results[0]['change_metrics']
         assert metrics['ssim_score'] == 1.0, \
@@ -495,8 +540,8 @@ class TestMLSmartSampler:
             min_frame_interval=0.0,
             backup_interval=1.0,
         )
-        frames = [(_make_natural_frame(seed=i * 100), float(i) * 2.0) for i in range(10)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i * 100) for i in range(10)], time_step=2.0)
+        results = list(sampler.sample(iter(frames_data)))
 
         assert len(results) > 0, "应有输出"
         assert results[0]['frame_index'] == 0, "第一个输出应为首帧（frame_index=0）"
@@ -508,7 +553,7 @@ class TestMLSmartSampler:
         # 模拟单张图片输入
         frame = _make_natural_frame(seed=42)
         frames = [(frame, 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
 
         assert len(results) == 1, "单张图片应有 1 个输出"
         result = results[0]
@@ -522,14 +567,14 @@ class TestMLSmartSampler:
         """首帧输出后，周期触发的计时起点应正确设置。"""
         sampler = MLSmartSampler(backup_interval=5.0)
         # 首帧
-        frames = [(_make_natural_frame(seed=0), 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = [(_numpy_to_pil(_make_natural_frame(seed=0)), 0.0, 0)]
+        results = list(sampler.sample(iter(frames_data)))
         assert len(results) == 1
 
         # 继续输入，确认周期触发计时正确
         # 在 backup_interval 之内不应触发周期
         more_frames = [(_make_natural_frame(seed=i), float(i)) for i in range(1, 4)]
-        results2 = list(sampler.sample(iter(more_frames)))
+        results2 = list(sampler.sample(iter(more_frames_data)))
 
         # 由于时间间隔小于 backup_interval(5.0)，不应有纯周期触发
         # 但可能有其他触发（运动、场景切换等）
@@ -547,7 +592,7 @@ class TestMLSmartSampler:
             sampler = MLSmartSampler()
             frame = _make_natural_frame(h=h, w=w, seed=0)
             frames = [(frame, 0.0)]
-            results = list(sampler.sample(iter(frames)))
+            results = list(sampler.sample(iter(frames_data)))
 
             assert len(results) == 1, f"分辨率 {w}x{h} 首帧应输出"
             result = results[0]
@@ -560,7 +605,7 @@ class TestMLSmartSampler:
         sampler = MLSmartSampler()
         frame = _make_natural_frame(seed=0)
         frames = [(frame, 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
 
         from PIL import Image
         pil_img = results[0]['image']
@@ -572,7 +617,7 @@ class TestMLSmartSampler:
         sampler = MLSmartSampler()
         frame = _make_natural_frame(seed=0)
         frames = [(frame, 0.0)]
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
 
         assert 'periodic' in results[0].get('source', []), \
             "首帧 source 应包含 'periodic'"
@@ -584,8 +629,8 @@ class TestMLSmartSampler:
             backup_interval=2.0,  # 短周期便于测试
         )
         # 生成足够多的帧，确保有周期触发
-        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(10)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i) for i in range(10)])
+        results = list(sampler.sample(iter(frames_data)))
 
         # 检查是否存在周期边界帧
         periodic_boundary_frames = [r for r in results if 'periodic' in r.get('source', [])]
@@ -603,7 +648,7 @@ class TestMLSmartSampler:
             # 每帧差异较大
             frames.append((_make_natural_frame(seed=i * 1000), float(i * 0.5)))
 
-        results = list(sampler.sample(iter(frames)))
+        results = list(sampler.sample(iter(frames_data)))
 
         # 非首帧且非周期触发的帧，source 不应包含 'periodic'
         for result in results[1:]:  # 跳过首帧
@@ -617,8 +662,8 @@ class TestMLSmartSampler:
             enable_smart_sampling=False,
             backup_interval=2.0,
         )
-        frames = [(_make_natural_frame(seed=i), float(i)) for i in range(10)]
-        results = list(sampler.sample(iter(frames)))
+        frames_data = _make_frames_pil([_make_natural_frame(seed=i) for i in range(10)])
+        results = list(sampler.sample(iter(frames_data)))
 
         for result in results:
             assert result['source'] == ['traditional'], \

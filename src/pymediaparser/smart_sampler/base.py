@@ -68,21 +68,20 @@ class SmartSampler(ABC):
 
     @abstractmethod
     def sample(
-        self, frames: Iterator[tuple[np.ndarray, float]],
+        self, frames: Iterator[tuple[Image.Image, float, int]],
     ) -> Iterator[Dict[str, Any]]:
         """核心采样方法。
 
         Args:
-            frames: 帧迭代器，每个元素是 (BGR图像, 时间戳) 元组。
+            frames: 帧迭代器，每个元素是 (PIL图像, 时间戳, 帧序号) 元组。
 
         Yields:
             采样结果字典，包含以下字段:
                 - image: PIL.Image 对象（处理后的图像）
                 - timestamp: 时间戳
-                - frame_index: 帧序号
+                - frame_index: 帧序号（来自输入，非内部统计）
                 - significant: 是否为显著帧
                 - source: 触发来源 ('smart', 'time', 等)
-                - original_frame: 原始 numpy 数组
                 - change_metrics: 变化指标字典（可选）
         """
         pass

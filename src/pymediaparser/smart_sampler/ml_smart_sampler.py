@@ -80,12 +80,12 @@ class MLSmartSampler(SmartSampler):
     # ── 核心采样接口 ──────────────────────────────────
 
     def sample(
-        self, frames: Iterator[tuple[np.ndarray, float]],
+        self, frames: Iterator[tuple[Image.Image, float, int]],
     ) -> Iterator[Dict[str, Any]]:
         """三层漏斗过滤，接口与 SmartSampler.sample() 完全一致。
 
         Args:
-            frames: 帧迭代器，每个元素是 (BGR图像, 时间戳) 元组。
+            frames: 帧迭代器，每个元素是 (PIL图像, 时间戳, 帧序号) 元组。
 
         Yields:
             采样结果字典（格式与 SmartSampler 一致）。
@@ -97,28 +97,42 @@ class MLSmartSampler(SmartSampler):
             )
             self._sample_started = True
 
-        for frame_np, ts in frames:
-            if frame_np is None or frame_np.size == 0:
+        for pil_image, ts, idx in frames:
+            # 跳过 None 和空帧
+            if pil_image is None:
                 continue
+            # 如果是 numpy 数组（向后兼容），检查是否为空
+            if isinstance(pil_image, np.ndarray):
+                if pil_image.size == 0:
+                    continue
+                # 转换为 PIL
+                pil_image = cv2.cvtColor(pil_image, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(pil_image)
 
-            # 全局帧序号（含被拒帧）
-            current_frame_idx = self._input_frame_count
+            # 递增输入帧计数器（用于统计）
             self._input_frame_count += 1
+            # 使用流水线传入的帧序号
+            current_frame_idx = idx
 
             if not self.enable_smart:
                 # 降级为纯时间采样（传统固定间隔采样）
                 if self._should_emit_by_time(ts):
-                    pil_image = self._numpy_to_pil(frame_np)
                     yield {
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': current_frame_idx,
                         'significant': False,
                         'source': ['traditional'],  # 传统固定间隔采样
-                        'original_frame': frame_np,
                     }
                     self._last_emit_ts = ts
                 continue
+
+            # 转换为 numpy 供内部处理
+            # 向后兼容
+            if isinstance(pil_image, np.ndarray):
+                frame_np = pil_image
+            else:
+                frame_np = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
             # ── Layer 0: 硬过滤 ──
             passed, reason = self.hard_filter.check(frame_np, ts)
@@ -149,7 +163,7 @@ class MLSmartSampler(SmartSampler):
 
             # ── 通过：组装返回字典 ──
             result = self._build_result(
-                frame_np, ts, current_frame_idx, triggers, validation,
+                pil_image, ts, current_frame_idx, triggers, validation,
             )
             self._last_emit_ts = ts
             self._yield_count += 1
@@ -188,14 +202,13 @@ class MLSmartSampler(SmartSampler):
 
     def _build_result(
         self,
-        frame_np: np.ndarray,
+        pil_image: Image.Image,
         ts: float,
         frame_idx: int,
         triggers: List[str],
         validation: Dict[str, Any],
     ) -> Dict[str, Any]:
         """组装与 SmartSampler 完全一致的返回字典，并打印日志。"""
-        pil_image = self._numpy_to_pil(frame_np)
 
         # change_metrics（兼容 SmartSampler 格式）
         motion_score = self.fast_triggers.last_motion_score
@@ -211,7 +224,6 @@ class MLSmartSampler(SmartSampler):
             'frame_index': frame_idx,
             'significant': is_significant,
             'source': triggers,  # 直接使用触发器列表
-            'original_frame': frame_np,
             'change_metrics': {
                 'ssim_score': ssim_score,
                 'combined_score': combined_score,

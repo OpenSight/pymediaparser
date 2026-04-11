@@ -54,7 +54,7 @@ class SimpleSmartSampler(SmartSampler):
     # ── 核心采样接口 ──────────────────────────────────────
 
     def sample(
-        self, frames: Iterator[tuple[np.ndarray, float]],
+        self, frames: Iterator[tuple[Image.Image, float, int]],
     ) -> Iterator[Dict[str, Any]]:
         """智能采样主入口。"""
         # 只在首次调用时打印一次日志
@@ -62,30 +62,39 @@ class SimpleSmartSampler(SmartSampler):
             logger.info("开始智能采样 - 模式: %s", "智能采样" if self.enable_smart else "时间采样")
             self._sample_started = True
         
-        for frame_np, ts in frames:
-            if frame_np is None or frame_np.size == 0:
+        for pil_image, ts, idx in frames:
+            # 跳过 None 和空帧
+            if pil_image is None:
                 continue
+            # 如果是 numpy 数组（向后兼容），检查是否为空
+            if isinstance(pil_image, np.ndarray):
+                if pil_image.size == 0:
+                    continue
+                # 转换为 PIL
+                pil_image = cv2.cvtColor(pil_image, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(pil_image)
             
-            # 每帧送入时立即递增计数器（无论是否被筛选）
-            current_frame_idx = self._input_frame_count
+            # 递增输入帧计数器（用于统计）
             self._input_frame_count += 1
+            # 使用流水线传入的帧序号
+            current_frame_idx = idx
                 
             time_based_emit = self._should_emit_by_time(ts)
             
             if self.enable_smart:
+                # 转换为 numpy 供内部处理
+                frame_np = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                 sample_result = self._smart_sample_frame(frame_np, ts, current_frame_idx, time_based_emit)
                 if sample_result:
                     yield sample_result
             else:
                 if time_based_emit:
-                    pil_image = self._numpy_to_pil(frame_np)
                     yield {
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': current_frame_idx,
                         'significant': False,
                         'source': ['traditional'],  # 传统固定间隔采样
-                        'original_frame': frame_np
                     }
                     self._last_emit_ts = ts
 
@@ -136,7 +145,6 @@ class SimpleSmartSampler(SmartSampler):
                 'frame_index': frame_idx,
                 'significant': is_significant,
                 'source': triggers,  # 触发源列表
-                'original_frame': frame_np,
                 'change_metrics': {
                     'ssim_score': change_result['ssim_score'],
                     'combined_score': change_result['combined_score'],

@@ -457,10 +457,8 @@ class LivePipeline(BasePipeline):
                     break
 
                 if self._use_processor_thread:
-                    # 智能模式/预处理模式：PIL 转 numpy(BGR) 入处理器队列
-                    import cv2
-                    frame_np = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-                    item = (frame_np, ts, idx)
+                    # 智能模式/预处理模式：直接传递 PIL 图像 + idx
+                    item = (image, ts, idx)
                 else:
                     # 传统模式：输出统一的字典格式
                     item = {
@@ -652,13 +650,12 @@ class LivePipeline(BasePipeline):
                     self._enqueue_frame(None)
                     break
 
-                frame_np, ts, idx = item
+                pil_image, ts, idx = item
 
                 # 统一获取帧数据迭代器
                 if self.smart_sampler:
-                    frame_iter = self.smart_sampler.sample(iter([(frame_np, ts)]))
+                    frame_iter = self.smart_sampler.sample(iter([(pil_image, ts, idx)]))
                 else:
-                    pil_image = self._numpy_to_pil(frame_np)
                     frame_iter = iter([{
                         'image': pil_image,
                         'timestamp': ts,
